@@ -1170,7 +1170,7 @@ def _call_llm_sync(news_content: str, model_cfg: Dict[str, str]) -> Dict[str, An
         ) from e
 
     body = json.loads(resp.read().decode("utf-8"))
-    raw_text = body["choices"][0]["message"]["content"].strip()
+    raw_text = (body["choices"][0]["message"]["content"] or "").strip()
 
     # 保存原始响应用于后续 XML 标签提取
     raw_response = raw_text

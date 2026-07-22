@@ -1137,14 +1137,31 @@ def _call_llm_sync(news_content: str, model_cfg: Dict[str, str]) -> Dict[str, An
             if proxy_addr:
                 proxy_handler = urllib.request.ProxyHandler({"http": proxy_addr, "https": proxy_addr})
 
-        try:
-            opener = urllib.request.build_opener(proxy_handler) if proxy_handler else urllib.request.build_opener()
-            resp = opener.open(req, timeout=45)
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8", errors="replace")[:300]
+        # HTTP 429 retry logic — Kimi K3 upstream rate-limit is transient
+        retry_delays = [5.0, 10.0, 20.0]  # progressive backoff
+        last_err = None
+        for attempt, delay in enumerate([0] + retry_delays):
+            try:
+                if delay > 0:
+                    time.sleep(delay)
+                opener = urllib.request.build_opener(proxy_handler) if proxy_handler else urllib.request.build_opener()
+                resp = opener.open(req, timeout=45)
+                break  # success → exit retry loop
+            except urllib.error.HTTPError as e:
+                last_err = e
+                if e.code == 429 and attempt < len(retry_delays):
+                    print(f"  [{model_cfg['label']}] HTTP 429, retry {attempt+1}/{len(retry_delays)} after {delay}s", flush=True)
+                    continue
+                err_body = e.read().decode("utf-8", errors="replace")[:300]
+                raise RuntimeError(
+                    f"{model_cfg['label']} HTTP {e.code}: {err_body}"
+                ) from e
+        else:
+            # All retries exhausted
+            err_body = last_err.read().decode("utf-8", errors="replace")[:300] if last_err else "unknown"
             raise RuntimeError(
-                f"{model_cfg['label']} HTTP {e.code}: {err_body}"
-            ) from e
+                f"{model_cfg['label']} HTTP 429 (exhausted retries): {err_body}"
+            )
 
         resp_bytes = resp.read()
         body = json.loads(resp_bytes.decode("utf-8"))

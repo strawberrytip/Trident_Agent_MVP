@@ -1082,139 +1082,172 @@ def _call_llm_sync(news_content: str, model_cfg: Dict[str, str]) -> Dict[str, An
 
     model_cfg.keys: id, label, api_base, api_key
     Returns: {"sentiment_score", "suggested_action", "reasoning", "model_label", "model_id"}
+
+    Retry strategy: if json_mode=True produces unparseable output (keyword fallback),
+    retry once with json_mode=False (prompt-based JSON enforcement).  This handles
+    OpenRouter edge cases where response_format={"type":"json_object"} is not
+    perfectly proxied to certain models.
     """
-    # 防御性初始化：提前声明 raw_response，避免后续引用时 NameError
-    raw_response = ""
 
-    use_json_mode = model_cfg.get("json_mode", True)
-    if model_cfg.get("label") == "Doubao":
-        prompt = _DOUBAO_SYSTEM_PROMPT
-    else:
-        prompt = _SYSTEM_PROMPT if use_json_mode else _JSON_PROMPT_FORCE
+    # ------------------------------------------------------------------
+    # Inner: make one HTTP call and return raw response text + full body
+    # ------------------------------------------------------------------
+    def _do_api_call(use_json: bool) -> str:
+        """Execute one LLM API call. Returns raw_text (or raises)."""
+        if model_cfg.get("label") == "Doubao":
+            prompt = _DOUBAO_SYSTEM_PROMPT
+        else:
+            prompt = _SYSTEM_PROMPT if use_json else _JSON_PROMPT_FORCE
 
-    payload: Dict[str, Any] = {
-        "model": model_cfg["id"],
-        "messages": [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": news_content[:2000]},
-        ],
-        "max_tokens": 2048,
-        "temperature": 0.1,
-    }
-    if use_json_mode:
-        payload["response_format"] = {"type": "json_object"}
+        payload: Dict[str, Any] = {
+            "model": model_cfg["id"],
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": news_content[:2000]},
+            ],
+            "max_tokens": 2048,
+            "temperature": 0.1,
+        }
+        if use_json:
+            payload["response_format"] = {"type": "json_object"}
 
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        f"{model_cfg['api_base']}/chat/completions",
-        data=data,
-        headers={
-            "Authorization": f"Bearer {model_cfg['api_key']}",
-            "Content-Type": "application/json",
-        },
-    )
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            f"{model_cfg['api_base']}/chat/completions",
+            data=data,
+            headers={
+                "Authorization": f"Bearer {model_cfg['api_key']}",
+                "Content-Type": "application/json",
+            },
+        )
 
-    # Custom SSL context — some China-hosted APIs need relaxed cipher negotiation
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = True
-    ssl_ctx.verify_mode = ssl.CERT_REQUIRED
-    try:
-        ssl_ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
-    except Exception:
-        pass
+        # Custom SSL context — some China-hosted APIs need relaxed cipher negotiation
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = True
+        ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+        try:
+            ssl_ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+        except Exception:
+            pass
 
-    # Proxy support — use local proxy for OpenRouter models only when HTTP_PROXY is set
-    proxy_handler = None
-    if "openrouter" in model_cfg['api_base'].lower():
-        proxy_addr = os.getenv("HTTP_PROXY", "").strip()
-        if proxy_addr:
-            proxy_handler = urllib.request.ProxyHandler({"http": proxy_addr, "https": proxy_addr})
+        # Proxy support — use local proxy for OpenRouter models only when HTTP_PROXY is set
+        proxy_handler = None
+        if "openrouter" in model_cfg['api_base'].lower():
+            proxy_addr = os.getenv("HTTP_PROXY", "").strip()
+            if proxy_addr:
+                proxy_handler = urllib.request.ProxyHandler({"http": proxy_addr, "https": proxy_addr})
 
-    try:
-        opener = urllib.request.build_opener(proxy_handler) if proxy_handler else urllib.request.build_opener()
-        resp = opener.open(req, timeout=45)
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")[:300]
-        raise RuntimeError(
-            f"{model_cfg['label']} HTTP {e.code}: {err_body}"
-        ) from e
+        try:
+            opener = urllib.request.build_opener(proxy_handler) if proxy_handler else urllib.request.build_opener()
+            resp = opener.open(req, timeout=45)
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")[:300]
+            raise RuntimeError(
+                f"{model_cfg['label']} HTTP {e.code}: {err_body}"
+            ) from e
 
-    resp_bytes = resp.read()
-    body = json.loads(resp_bytes.decode("utf-8"))
-    raw_text = (body["choices"][0]["message"]["content"] or "").strip()
+        resp_bytes = resp.read()
+        body = json.loads(resp_bytes.decode("utf-8"))
+        raw_text = (body["choices"][0]["message"]["content"] or "").strip()
 
-    # 保存原始响应用于后续 XML 标签提取
-    raw_response = raw_text
+        if not raw_text:
+            finish = body["choices"][0].get("finish_reason", "unknown")
+            body_preview = resp_bytes.decode("utf-8", errors="replace")[:500]
+            print(f"  [{model_cfg['label']}] EMPTY RESPONSE | finish_reason={finish} | body_preview={body_preview}", flush=True)
+            raise ValueError(f"empty response from {model_cfg['label']}")
 
-    if not raw_text:
-        finish = body["choices"][0].get("finish_reason", "unknown")
-        # 截取前 500 字符用于调试，避免日志爆炸
-        body_preview = resp_bytes.decode("utf-8", errors="replace")[:500]
-        print(f"  [{model_cfg['label']}] EMPTY RESPONSE | finish_reason={finish} | body_preview={body_preview}", flush=True)
-        raise ValueError(f"empty response from {model_cfg['label']}")
+        return raw_text
 
-    # Parse JSON — handle markdown wrapping + embedded/truncated JSON
-    cleaned = re.sub(r"^```(?:json)?\s*", "", raw_text)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
+    # ------------------------------------------------------------------
+    # Inner: parse raw text → result dict (with all three fallback tiers)
+    # ------------------------------------------------------------------
+    def _parse_result(raw_text: str) -> Dict[str, Any]:
+        """Parse LLM output — never returns empty dict (keyword fallback guarantees)."""
+        # Parse JSON — handle markdown wrapping + embedded/truncated JSON
+        cleaned = re.sub(r"^```(?:json)?\s*", "", raw_text)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
 
-    result: Dict[str, Any] = {}
-    try:
-        result = json.loads(cleaned)
-        if not isinstance(result, dict):
-            raise ValueError("not a dict")
-    except (json.JSONDecodeError, ValueError):
-        # --- Fallback 1: repair truncated JSON ---
-        # If max_tokens cut off mid-JSON, keep only complete fields
-        repaired = cleaned.strip()
-        if repaired.startswith("{") and not repaired.endswith("}"):
-            # Strip leading { then split by , — each chunk is "key": val
-            inner = repaired[1:].strip()
-            chunks = [c.strip() for c in inner.split(",") if c.strip()]
-            complete: List[str] = []
-            for chunk in chunks:
-                try:
-                    json.loads("{" + chunk + "}")
-                    complete.append(chunk)
-                except json.JSONDecodeError:
-                    pass  # truncated field — drop
-            if complete:
-                repaired = "{" + ",".join(complete) + "}"
-                try:
-                    result = json.loads(repaired)
-                except json.JSONDecodeError:
-                    pass  # fall through
-
-        # --- Fallback 2: regex-extract JSON containing required keys ---
-        if not result:
-            m = re.search(
-                r'\{[^{}]*"sentiment_score"[^{}]*"suggested_action"[^{}]*"reasoning"[^{}]*\}',
-                cleaned, re.DOTALL,
-            )
-            if not m:
-                m = re.search(
-                    r'\{[^{}]*"(?:sentiment_score|suggested_action|reasoning)"[^{}]*\}',
-                    cleaned, re.DOTALL,
-                )
-            if m:
-                try:
-                    result = json.loads(m.group(0))
-                except json.JSONDecodeError:
-                    # Try to close a truncated regex match
-                    frag = m.group(0).rstrip().rstrip(",") + "}"
+        result: Dict[str, Any] = {}
+        try:
+            result = json.loads(cleaned)
+            if not isinstance(result, dict):
+                raise ValueError("not a dict")
+        except (json.JSONDecodeError, ValueError):
+            # --- Fallback 1: repair truncated JSON ---
+            repaired = cleaned.strip()
+            if repaired.startswith("{") and not repaired.endswith("}"):
+                inner = repaired[1:].strip()
+                chunks = [c.strip() for c in inner.split(",") if c.strip()]
+                complete: List[str] = []
+                for chunk in chunks:
                     try:
-                        result = json.loads(frag)
+                        json.loads("{" + chunk + "}")
+                        complete.append(chunk)
+                    except json.JSONDecodeError:
+                        pass  # truncated field — drop
+                if complete:
+                    repaired = "{" + ",".join(complete) + "}"
+                    try:
+                        result = json.loads(repaired)
                     except json.JSONDecodeError:
                         pass
 
-        # --- Fallback 3: keyword-based heuristics ---
-        if not result:
-            text_lower = cleaned.lower()
-            if any(w in text_lower for w in ("利好", "上涨", "看涨", "bullish", "buy")):
-                result = {"reasoning_path": "关键词推断 → 偏多信号", "sentiment_score": 0.4, "suggested_action": "BUY", "reasoning": "关键词推断:偏多", "market_category": "OTHER", "target_asset": "NONE"}
-            elif any(w in text_lower for w in ("利空", "下跌", "看跌", "bearish", "sell", "战争", "制裁")):
-                result = {"reasoning_path": "关键词推断 → 偏空信号", "sentiment_score": -0.4, "suggested_action": "SELL", "reasoning": "关键词推断:偏空", "market_category": "OTHER", "target_asset": "NONE"}
-            else:
-                result = {"reasoning_path": "关键词推断 → 中性观望", "sentiment_score": 0.05, "suggested_action": "HOLD", "reasoning": "关键词推断:观望", "market_category": "OTHER", "target_asset": "NONE"}
+            # --- Fallback 2: regex-extract JSON containing required keys ---
+            if not result:
+                m = re.search(
+                    r'\{[^{}]*"sentiment_score"[^{}]*"suggested_action"[^{}]*"reasoning"[^{}]*\}',
+                    cleaned, re.DOTALL,
+                )
+                if not m:
+                    m = re.search(
+                        r'\{[^{}]*"(?:sentiment_score|suggested_action|reasoning)"[^{}]*\}',
+                        cleaned, re.DOTALL,
+                    )
+                if m:
+                    try:
+                        result = json.loads(m.group(0))
+                    except json.JSONDecodeError:
+                        frag = m.group(0).rstrip().rstrip(",") + "}"
+                        try:
+                            result = json.loads(frag)
+                        except json.JSONDecodeError:
+                            pass
+
+            # --- Fallback 3: keyword-based heuristics ---
+            if not result:
+                text_lower = cleaned.lower()
+                if any(w in text_lower for w in ("利好", "上涨", "看涨", "bullish", "buy")):
+                    result = {"reasoning_path": "关键词推断 → 偏多信号", "sentiment_score": 0.4, "suggested_action": "BUY", "reasoning": "关键词推断:偏多", "market_category": "OTHER", "target_asset": "NONE"}
+                elif any(w in text_lower for w in ("利空", "下跌", "看跌", "bearish", "sell", "战争", "制裁")):
+                    result = {"reasoning_path": "关键词推断 → 偏空信号", "sentiment_score": -0.4, "suggested_action": "SELL", "reasoning": "关键词推断:偏空", "market_category": "OTHER", "target_asset": "NONE"}
+                else:
+                    result = {"reasoning_path": "关键词推断 → 中性观望", "sentiment_score": 0.05, "suggested_action": "HOLD", "reasoning": "关键词推断:观望", "market_category": "OTHER", "target_asset": "NONE"}
+
+        return result
+
+    # ==================================================================
+    # Main call flow
+    # ==================================================================
+    use_json_mode = model_cfg.get("json_mode", True)
+
+    # First attempt — with configured json_mode
+    raw_text = _do_api_call(use_json_mode)
+    result = _parse_result(raw_text)
+
+    # Retry: if strict JSON mode fell through to keyword heuristics, try prompt mode
+    if (use_json_mode
+            and model_cfg.get("label") != "Doubao"
+            and result.get("reasoning_path", "").startswith("关键词推断")
+            and len(raw_text) > 10):
+        print(f"  [{model_cfg['label']}] json_mode=True → keyword, retrying prompt-mode...", flush=True)
+        try:
+            raw_text2 = _do_api_call(False)
+            result2 = _parse_result(raw_text2)
+            if not result2.get("reasoning_path", "").startswith("关键词推断"):
+                result = result2
+                print(f"  [{model_cfg['label']}] retry OK (prompt-JSON)", flush=True)
+        except Exception:
+            pass  # Keep original keyword result if retry fails
 
     # ── Doubao fast path: simplified response, no scoring or CoT ──
     if model_cfg.get("label") == "Doubao":

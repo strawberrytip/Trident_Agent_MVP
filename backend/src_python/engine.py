@@ -95,7 +95,7 @@ DOUBAO_MODEL = os.getenv("DOUBAO_MODEL", "")
 
 # ===== Core Models (Kimi K3 + Doubao) — 保留现有逻辑 =====
 _MODELS_BASE: List[Dict[str, Any]] = [
-    {"id": "moonshotai/kimi-k3", "label": "Kimi K3", "api_base": OPENROUTER_BASE_URL, "api_key": OPENROUTER_API_KEY, "json_mode": False},
+    {"id": "moonshotai/kimi-k3", "label": "Kimi K3", "api_base": OPENROUTER_BASE_URL, "api_key": OPENROUTER_API_KEY, "json_mode": True},
 ]
 # Doubao 已禁用 - 账户欠费
 # if DOUBAO_API_KEY and DOUBAO_MODEL:

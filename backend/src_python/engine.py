@@ -2064,6 +2064,8 @@ def _ensure_db_exists() -> None:
 
         # ── Migration: add aggregation columns (safe to run every startup) ──
         for col, col_def in [
+            ("market_category",  "TEXT    NOT NULL DEFAULT 'OTHER'"),
+            ("target_asset",     "TEXT    NOT NULL DEFAULT 'NONE'"),
             ("parent_id",        "INTEGER DEFAULT NULL"),
             ("child_count",      "INTEGER DEFAULT 0"),
             ("aggregation_key",  "TEXT    DEFAULT ''"),

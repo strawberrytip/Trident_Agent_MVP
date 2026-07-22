@@ -1173,13 +1173,18 @@ def _call_llm_sync(news_content: str, model_cfg: Dict[str, str]) -> Dict[str, An
             f"{model_cfg['label']} HTTP {e.code}: {err_body}"
         ) from e
 
-    body = json.loads(resp.read().decode("utf-8"))
+    resp_bytes = resp.read()
+    body = json.loads(resp_bytes.decode("utf-8"))
     raw_text = (body["choices"][0]["message"]["content"] or "").strip()
 
     # 保存原始响应用于后续 XML 标签提取
     raw_response = raw_text
 
     if not raw_text:
+        finish = body["choices"][0].get("finish_reason", "unknown")
+        # 截取前 500 字符用于调试，避免日志爆炸
+        body_preview = resp_bytes.decode("utf-8", errors="replace")[:500]
+        print(f"  [{model_cfg['label']}] EMPTY RESPONSE | finish_reason={finish} | body_preview={body_preview}", flush=True)
         raise ValueError(f"empty response from {model_cfg['label']}")
 
     # Parse JSON — handle markdown wrapping + embedded/truncated JSON

@@ -104,7 +104,7 @@ export function KlineChart({ symbol, events }: Props) {
     data: CandlestickData[]
     timeSet: Set<number>
   }> => {
-    const resp = await fetch(`http://localhost:8000/api/klines?symbol=${klineId}&limit=200`)
+    const resp = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/klines?symbol=${klineId}&limit=200`)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     const raw = await resp.json()
 

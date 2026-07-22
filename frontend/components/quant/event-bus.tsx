@@ -5,7 +5,7 @@ import { ChevronDown, ChevronRight, Download, Radio, Wifi, WifiOff } from 'lucid
 import type { ApiEvent } from '@/lib/quant-data'
 import { SignalBadge } from './signal-badge'
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || ''
 const SSE_URL = `${API_BASE}/api/events/stream`
 const MAX_EVENTS = 100
 

@@ -1,0 +1,157 @@
+# ============================================================
+# Trident Agent MVP — .gitignore
+# ============================================================
+# 量化交易系统 / 实盘交易 / API 密钥 / 数据库 / 构建产物
+# ============================================================
+
+# ── Secrets & Environment ──────────────────────────────────
+# 包含 Binance API Key、大模型 Key (OpenRouter/DeepSeek/Doubao/XAI)、MT5 凭证
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# 防止误提交任何包含 "secret" / "credential" / "key" 的配置文件
+*secret*
+*credential*
+*private*
+
+# ── Python ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+*.whl
+*.manifest
+*.spec
+
+# Virtual environments
+venv/
+.venv/
+env/
+env.bak/
+ENV/
+
+# pip / pipenv
+Pipfile.lock
+pip-delete-this-directory.txt
+
+# ── Node.js / Next.js ──────────────────────────────────────
+node_modules/
+.next/
+*.tsbuildinfo
+next-env.d.ts
+out/
+
+# ── Databases (CRITICAL) ───────────────────────────────────
+# 存储动态 ATR 止损止盈参数和实盘交易账单，绝对不可泄露
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+
+# ChromaDB 向量存储（Hermes Research Agent 运行时数据）
+chroma_data/
+
+# ── MetaTrader 5 ───────────────────────────────────────────
+# MT5 本地终端日志、缓存、配置
+MQL5/
+mt5_*.log
+MT5_*.log
+*.mt5log
+terminal*.log
+tester*.log
+*.mqlcache
+
+# ── Backup / Temp / Broken ─────────────────────────────────
+*.bak
+*.broken
+*.tmp
+*.temp
+*.orig
+*~
+*.swp
+*.swo
+*.swn
+*.old
+
+# ── IDE / Editor ───────────────────────────────────────────
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+.history/
+*.iml
+
+# ── OS ─────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ── Excel Lock Files ───────────────────────────────────────
+~$*.xlsx
+~$*.xls
+~$*.docx
+~$*.pptx
+~$*.xlsm
+
+# ── Generated / Export / Data ──────────────────────────────
+dashboard/*.xlsx
+!dashboard/*_sample.xlsx
+*.csv
+
+# ── Media / Large Binaries ─────────────────────────────────
+*.mp4
+*.mp3
+*.mov
+*.avi
+*.webm
+*.wav
+*.flac
+*.zip
+*.tar.gz
+*.rar
+*.7z
+*.pdf
+
+# ── Test / Coverage ────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+nosetests.xml
+*.cover
+
+# ── Docker ─────────────────────────────────────────────────
+.docker/
+docker-compose.override.yml
+
+# ── Logs ───────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Misc ───────────────────────────────────────────────────
+# macOS resource fork
+*.rsrc
+
+# Memory files (runtime state)
+.memory/

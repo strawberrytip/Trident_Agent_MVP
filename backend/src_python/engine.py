@@ -144,6 +144,10 @@ _OPENROUTER_MODELS: List[Dict[str, Any]] = [
 # 总计 6 个模型并发推理
 MODELS: List[Dict[str, Any]] = _MODELS_BASE + _OPENROUTER_MODELS
 
+# 全局并发限流 — 同一时刻最多 8 个 LLM 请求飞向 OpenRouter
+# 避免突发新闻潮（5条×5模型=25并发）打爆上游 API
+_LLM_SEMAPHORE = asyncio.Semaphore(8)
+
 # FinancialJuice WebSocket — real-time ingest
 FJ_WS_URL = "wss://rt.financialjuice.com/connection/websocket"
 FJ_ORIGIN = "https://www.financialjuice.com"
@@ -1327,7 +1331,7 @@ def _call_deepseek_sync(news_content: str) -> Dict[str, Any]:
 # Task B — Concurrent Batch AI Worker
 # ---------------------------------------------------------------------------
 
-BATCH_SIZE = 10
+BATCH_SIZE = 5
 
 
 async def _process_single(
@@ -1361,16 +1365,17 @@ async def _process_single(
         timeout = 45.0  # Kimi K3/Doubao 保持 45 秒
 
     try:
-        if model_cfg["label"] in ("DeepSeek", "Gemini", "Grok", "ChatGPT"):
-            # 为新增模型添加 asyncio.wait_for 超时保护
-            llm_result = await asyncio.wait_for(
-                loop.run_in_executor(None, _call_llm_sync, content, model_cfg),
-                timeout=timeout,
-            )
-        else:
-            # Kimi K3 和 Doubao 保持原有超时逻辑（在 _call_llm_sync 内部）
-            llm_result = await loop.run_in_executor(
-                None, _call_llm_sync, content, model_cfg,
+        async with _LLM_SEMAPHORE:
+            if model_cfg["label"] in ("DeepSeek", "Gemini", "Grok", "ChatGPT"):
+                # 为新增模型添加 asyncio.wait_for 超时保护
+                llm_result = await asyncio.wait_for(
+                    loop.run_in_executor(None, _call_llm_sync, content, model_cfg),
+                    timeout=timeout,
+                )
+            else:
+                # Kimi K3 和 Doubao 保持原有超时逻辑（在 _call_llm_sync 内部）
+                llm_result = await loop.run_in_executor(
+                    None, _call_llm_sync, content, model_cfg,
             )
         return {
             "news_id": news_id,

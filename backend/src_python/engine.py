@@ -1153,11 +1153,12 @@ def _call_llm_sync(news_content: str, model_cfg: Dict[str, str]) -> Dict[str, An
     except Exception:
         pass
 
-    # Proxy support — use local proxy for OpenRouter models
+    # Proxy support — use local proxy for OpenRouter models only when HTTP_PROXY is set
     proxy_handler = None
     if "openrouter" in model_cfg['api_base'].lower():
-        proxy_addr = os.getenv("HTTP_PROXY", "http://127.0.0.1:10808")
-        proxy_handler = urllib.request.ProxyHandler({"http": proxy_addr, "https": proxy_addr})
+        proxy_addr = os.getenv("HTTP_PROXY", "").strip()
+        if proxy_addr:
+            proxy_handler = urllib.request.ProxyHandler({"http": proxy_addr, "https": proxy_addr})
 
     try:
         opener = urllib.request.build_opener(proxy_handler) if proxy_handler else urllib.request.build_opener()

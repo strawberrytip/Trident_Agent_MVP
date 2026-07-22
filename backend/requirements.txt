@@ -1,0 +1,28 @@
+# ============================================================
+# Trident Agent MVP — Backend Dependencies
+# ============================================================
+# 安装: pip install -r requirements.txt
+# ============================================================
+
+# ── FastAPI + Server ────────────────────────────────────────
+fastapi>=0.115.0
+pydantic>=2.0
+uvicorn[standard]>=0.30.0
+
+# ── Database ────────────────────────────────────────────────
+aiosqlite>=0.20.0
+
+# ── LLM Client (DeepSeek / OpenRouter / xAI / Doubao) ──────
+openai>=1.50.0
+
+# ── Excel Export ────────────────────────────────────────────
+xlsxwriter>=3.1.0
+
+# ── Environment Config ─────────────────────────────────────
+python-dotenv>=1.0.0
+
+# ── Crypto Exchange (Binance) ──────────────────────────────
+ccxt>=4.3.0
+
+# ⚠️ MetaTrader5 仅支持 Windows，Ubuntu 跳过
+# MetaTrader5>=5.0

@@ -33,7 +33,9 @@ import urllib.error
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-# (inline .env loader — no external dependency)
+from dotenv import load_dotenv
+# .env 在项目根目录（backend/ 的上一层）
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", ".env"))
 
 # ---------------------------------------------------------------------------
 # Optional imports — not required; kept for compatibility

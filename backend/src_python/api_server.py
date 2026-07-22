@@ -31,6 +31,10 @@ from fastapi.responses import StreamingResponse
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE_DIR, "trident_event_bus.db")
+from dotenv import load_dotenv
+# .env 在项目根目录（backend/ 的上一层）
+load_dotenv(os.path.join(os.path.dirname(BASE_DIR), ".env"))
+
 TZ_SHANGHAI = timezone(timedelta(hours=8))
 
 _SSE_QUEUES: List[asyncio.Queue] = []

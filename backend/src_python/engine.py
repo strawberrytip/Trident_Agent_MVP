@@ -94,7 +94,7 @@ DOUBAO_MODEL = os.getenv("DOUBAO_MODEL", "")
 #   原因：Kimi K3 在 OpenRouter 上 json_mode=True 时频繁空响应/截断
 
 _MODELS_BASE: List[Dict[str, Any]] = [
-    {"id": "moonshotai/kimi-k3", "label": "Kimi K3", "api_base": OPENROUTER_BASE_URL, "api_key": OPENROUTER_API_KEY, "json_mode": False},
+    {"id": "moonshotai/kimi-k3", "label": "Kimi K3", "api_base": OPENROUTER_BASE_URL, "api_key": OPENROUTER_API_KEY, "json_mode": True},
 ]
 
 # Doubao 已禁用 - 账户欠费
@@ -1098,7 +1098,7 @@ def _call_llm_sync(news_content: str, model_cfg: Dict[str, str]) -> Dict[str, An
             {"role": "system", "content": prompt},
             {"role": "user", "content": news_content[:2000]},
         ],
-        "max_tokens": 1024,
+        "max_tokens": 2048,
         "temperature": 0.1,
     }
     if use_json_mode:
@@ -2500,7 +2500,7 @@ async def main():
     print(f"[MAIN] 模型配置:")
     for m in MODELS:
         key_status = "✅" if m.get("api_key") else "❌"
-        json_mode = "Prompt-JSON" if not m.get("json_mode") else "API-JSON"
+        json_mode = "Strict" if m.get("json_mode") else "Prompt"
         print(f"[MAIN]   {key_status} {m['label']:12s} | {m['id']:35s} | {json_mode} | Timeout: 45s")
     print(f"[MAIN] ══════════════════════════════════════════════")
 

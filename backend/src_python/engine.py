@@ -89,63 +89,29 @@ DOUBAO_API_KEY = os.getenv("DOUBAO_API_KEY", "")
 DOUBAO_BASE_URL = os.getenv("DOUBAO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
 DOUBAO_MODEL = os.getenv("DOUBAO_MODEL", "")
 
-# Model roster — each news item is analysed by ALL models concurrently
-# json_mode: whether the model supports response_format={"type":"json_object"}
-# Doubao is only added if DOUBAO_API_KEY and DOUBAO_MODEL (endpoint ID) are both set
+# Model roster — 单模型：Kimi K3（通过 OpenRouter）
+# json_mode: False — 关闭 API 级 response_format，改用 prompt 强制 JSON
+#   原因：Kimi K3 在 OpenRouter 上 json_mode=True 时频繁空响应/截断
 
-# ===== Core Models (Kimi K3 + Doubao) — 保留现有逻辑 =====
 _MODELS_BASE: List[Dict[str, Any]] = [
-    {"id": "moonshotai/kimi-k3", "label": "Kimi K3", "api_base": OPENROUTER_BASE_URL, "api_key": OPENROUTER_API_KEY, "json_mode": True},
+    {"id": "moonshotai/kimi-k3", "label": "Kimi K3", "api_base": OPENROUTER_BASE_URL, "api_key": OPENROUTER_API_KEY, "json_mode": False},
 ]
+
 # Doubao 已禁用 - 账户欠费
 # if DOUBAO_API_KEY and DOUBAO_MODEL:
 #     _MODELS_BASE.append(
-#         {"id": DOUBAO_MODEL, "label": "Doubao", "api_base": DOUBAO_BASE_URL, "api_key": DOUBAO_API_KEY, "json_mode": True}
+#         {"id": DOUBAO_MODEL, "label": "Doubao", "api_base": DOUBAO_BASE_URL, "api_key": DOUBAO_API_KEY, "json_mode": False}
 #     )
 
-# ===== Additional OpenRouter Models (四模并发扩展) =====
-# 所有新增模型通过 OpenRouter 统一端点调用，共享 OPENROUTER_API_KEY
-# 注意：模型 ID 需要与 OpenRouter 平台支持的模型名称一致
-# 参考：https://openrouter.ai/models
-_OPENROUTER_MODELS: List[Dict[str, Any]] = [
-    {
-        "id": "deepseek/deepseek-chat",
-        "label": "DeepSeek",
-        "api_base": OPENROUTER_BASE_URL,
-        "api_key": OPENROUTER_API_KEY,
-        "json_mode": True,
-    },
-    {
-        # Grok 4.3 - xAI 最新模型（Grok 3 已弃用）
-        "id": "x-ai/grok-4.3",
-        "label": "Grok",
-        "api_base": OPENROUTER_BASE_URL,
-        "api_key": OPENROUTER_API_KEY,
-        "json_mode": True,
-    },
-    {
-        # Gemini 2.5 Flash - 更快的模型，避免超时（速度比 Pro 快 2-3 倍）
-        "id": "google/gemini-2.5-flash",
-        "label": "Gemini",
-        "api_base": OPENROUTER_BASE_URL,
-        "api_key": OPENROUTER_API_KEY,
-        "json_mode": True,
-    },
-    {
-        "id": "openai/gpt-4o",
-        "label": "ChatGPT",
-        "api_base": OPENROUTER_BASE_URL,
-        "api_key": OPENROUTER_API_KEY,
-        "json_mode": True,
-    },
-]
+# ===== Additional OpenRouter Models (已禁用 — 国内 OpenRouter 区域限制) =====
+# DeepSeek/Gemini/Grok/ChatGPT 在部分区域返回 HTTP 403，暂时关闭
+# 如需恢复，取消下面的注释并追加到 MODELS
+# _OPENROUTER_MODELS: List[Dict[str, Any]] = [...]
+_OPENROUTER_MODELS: List[Dict[str, Any]] = []
 
-# ===== Final MODELS list = Core (Kimi K3 + Doubao) + Additional (4 models) =====
-# 总计 6 个模型并发推理
 MODELS: List[Dict[str, Any]] = _MODELS_BASE + _OPENROUTER_MODELS
 
-# 全局并发限流 — 同一时刻最多 8 个 LLM 请求飞向 OpenRouter
-# 避免突发新闻潮（5条×5模型=25并发）打爆上游 API
+# 全局并发限流 — 单模型时 5 条新闻最多 5 并发，Semaphore(8) 留有裕量
 _LLM_SEMAPHORE = asyncio.Semaphore(8)
 
 # FinancialJuice WebSocket — real-time ingest
@@ -1323,20 +1289,13 @@ def _call_llm_sync(news_content: str, model_cfg: Dict[str, str]) -> Dict[str, An
     }
 
 
-# Backward-compatible alias
-def _call_deepseek_sync(news_content: str) -> Dict[str, Any]:
-    """Legacy wrapper — calls DeepSeek only."""
-    for m in MODELS:
-        if m["id"] == "deepseek-chat":
-            return _call_llm_sync(news_content, m)
-    raise RuntimeError("DeepSeek model not found in MODELS list")
 
 
 # ---------------------------------------------------------------------------
 # Task B — Concurrent Batch AI Worker
 # ---------------------------------------------------------------------------
 
-BATCH_SIZE = 5
+BATCH_SIZE = 10
 
 
 async def _process_single(
@@ -1345,11 +1304,10 @@ async def _process_single(
     loop: asyncio.AbstractEventLoop,
 ) -> Dict[str, Any]:
     """
-    Process a single raw_news row through ONE model's LLM pipeline.
-    Called concurrently for every (news × model) combination.
+    Process a single raw_news row through ONE model's LLM pipeline (Kimi K3).
 
-    新增的四个 OpenRouter 模型（DeepSeek, Gemini, Grok, ChatGPT）使用 10 秒严格超时，
-    超时后自动 Fallback 返回 HOLD，确保不拖慢整体处理速度。
+    单模型模式：Kimi K3 使用 45 秒超时（在 _call_llm_sync 内部 urllib timeout=45s）。
+    信号量控制并发上限，避免突发新闻潮打爆 OpenRouter。
 
     Returns:
       {"news_id": int, "pre_ts": str, "model_label": str,
@@ -1359,28 +1317,10 @@ async def _process_single(
     content = re.sub(r'\[hash:[a-fA-F0-9]+\]\s*', '', news_row["content"])
     pre_ts = news_row["timestamp"]
 
-    # 检测是否为新增的 OpenRouter 模型（需要严格超时控制）
-    # Gemini 2.5 Flash 速度较快，设置 20 秒超时（与 DeepSeek/Grok 一致）
-    # ChatGPT 响应最快，保持 10 秒超时
-    if model_cfg["label"] in ("Gemini", "DeepSeek", "Grok"):
-        timeout = 20.0
-    elif model_cfg["label"] == "ChatGPT":
-        timeout = 10.0
-    else:
-        timeout = 45.0  # Kimi K3/Doubao 保持 45 秒
-
     try:
         async with _LLM_SEMAPHORE:
-            if model_cfg["label"] in ("DeepSeek", "Gemini", "Grok", "ChatGPT"):
-                # 为新增模型添加 asyncio.wait_for 超时保护
-                llm_result = await asyncio.wait_for(
-                    loop.run_in_executor(None, _call_llm_sync, content, model_cfg),
-                    timeout=timeout,
-                )
-            else:
-                # Kimi K3 和 Doubao 保持原有超时逻辑（在 _call_llm_sync 内部）
-                llm_result = await loop.run_in_executor(
-                    None, _call_llm_sync, content, model_cfg,
+            llm_result = await loop.run_in_executor(
+                None, _call_llm_sync, content, model_cfg,
             )
         return {
             "news_id": news_id,
@@ -1389,27 +1329,8 @@ async def _process_single(
             "result": llm_result,
             "error": None,
         }
-    except asyncio.TimeoutError:
-        # 新增模型超时 Fallback：返回 HOLD
-        fallback_result = {
-            "sentiment_score": 0.05,
-            "suggested_action": "HOLD",
-            "reasoning": f"{model_cfg['label']} 超时降级 (10s)",
-            "market_category": "OTHER",
-            "target_asset": "NONE",
-            "reasoning_path": "",
-            "model_label": model_cfg["label"],
-            "model_id": model_cfg["id"],
-        }
-        return {
-            "news_id": news_id,
-            "pre_ts": pre_ts,
-            "model_label": model_cfg["label"],
-            "result": fallback_result,
-            "error": f"TimeoutError: {timeout}s",
-        }
     except Exception as exc:
-        # 安全 Fallback：任何异常都返回 HOLD 对象，绝不返回 None 导致 FAILED
+        # 安全 Fallback：任何异常都返回 HOLD 对象
         fallback_result = {
             "sentiment_score": 0.05,
             "suggested_action": "HOLD",
@@ -1672,51 +1593,11 @@ async def ai_worker(loop: asyncio.AbstractEventLoop) -> None:
             parent_cache: Dict[str, int | None] = {}
             # news_id → decision_id  mapping for Doubao UPDATE pass
             kimi_decision_ids: Dict[int, int] = {}
-            # 新增：收集额外四个模型的结果，按 news_id 分组
-            extra_models_results: Dict[int, Dict[str, Any]] = {}
             try:
                 # ============================================================
                 # Phase 3a — Kimi K3 (primary) INSERT — aggregation + tracking
-                #           新增：额外四个模型结果收集
                 # ============================================================
-                # 只有 Kimi K3 创建数据库记录，其他模型（Doubao + 新增四个）不创建独立记录
                 kimi_results = [s for s in successes if s["model_label"] == "Kimi K3"]
-                # 收集额外四个模型的结果（DeepSeek, Gemini, Grok, ChatGPT）
-                extra_model_labels = {"DeepSeek", "Gemini", "Grok", "ChatGPT"}
-                # 调试：记录收到的额外模型结果
-                received_extra = set()
-                for s in successes:
-                    if s["model_label"] in extra_model_labels:
-                        received_extra.add(s["model_label"])
-                        nid = s["news_id"]
-                        if nid not in extra_models_results:
-                            extra_models_results[nid] = {}
-                        # 防御性检查：确保 result 是字典类型
-                        result = s["result"]
-                        if not isinstance(result, dict):
-                            # 如果返回值格式异常，使用默认 HOLD 值
-                            print(f"  [DEBUG] {s['model_label']} 返回格式异常: {type(result).__name__}，使用默认值")
-                            result = {
-                                "suggested_action": "HOLD",
-                                "sentiment_score": 0.05,
-                                "reasoning": f"{s['model_label']} 返回格式异常，降级为观望",
-                                "market_category": "OTHER",
-                                "target_asset": "NONE",
-                            }
-                        extra_models_results[nid][s["model_label"]] = {
-                            "action": result.get("suggested_action", "HOLD"),
-                            "score": result.get("sentiment_score", 0.05),
-                            "reasoning": result.get("reasoning_path", result.get("reasoning", f"{s['model_label']} 降级为观望")),
-                            "translated_title": result.get("translated_title", ""),
-                            "market_category": result.get("market_category", ""),
-                            "target_asset": result.get("target_asset", ""),
-                        }
-                # 打印额外模型接收情况（便于排查）
-                if received_extra:
-                    print(f"  [DEBUG] 额外模型成功: {', '.join(sorted(received_extra))}")
-                missing = extra_model_labels - received_extra
-                if missing:
-                    print(f"  [DEBUG] 额外模型缺失/失败: {', '.join(sorted(missing))}")
 
                 for s in kimi_results:
                     res = s["result"]
@@ -1869,25 +1750,6 @@ async def ai_worker(loop: asyncio.AbstractEventLoop) -> None:
                         pass
 
                 # ============================================================
-                # Phase 3c — Extra Models Consensus UPDATE
-                #           将额外四个模型（DeepSeek, Gemini, Grok, ChatGPT）的结果
-                #           写入 extra_models_consensus JSON 字段
-                # ============================================================
-                for nid, extra_results in extra_models_results.items():
-                    if nid in kimi_decision_ids:
-                        decision_id = kimi_decision_ids[nid]
-                        # 将额外模型结果序列化为 JSON 存储
-                        conn.execute(
-                            "UPDATE ai_decisions SET extra_models_consensus = ? WHERE id = ?",
-                            (json.dumps(extra_results, ensure_ascii=False), decision_id),
-                        )
-                        # 追加到 written 记录用于终端输出
-                        for w in written:
-                            if w["news_id"] == nid:
-                                w["extra_models"] = extra_results
-                                break
-
-                # ============================================================
                 # Mark DONE for all news_ids that produced a Kimi K3 row
                 # ============================================================
                 for nid in done_news_ids:
@@ -1971,22 +1833,6 @@ async def ai_worker(loop: asyncio.AbstractEventLoop) -> None:
                         f"**Doubao**: {db_action} — {db_reason}"
                     )
 
-                # Extra models (DeepSeek, Gemini, Grok, ChatGPT) — 六模并发矩阵输出
-                extra_models = d2.get("extra_models", {})
-                for model_name in ("DeepSeek", "Gemini", "Grok", "ChatGPT"):
-                    if model_name in extra_models:
-                        m_result = extra_models[model_name]
-                        m_action = m_result["action"]
-                        m_score = m_result["score"]
-                        m_reason = m_result["reasoning"]
-                        print(
-                            f"  │ [{model_name:8s}] {m_action:4s} {m_score:+.3f} | {m_reason}"
-                        )
-                        consensus[m_action] = consensus.get(m_action, 0) + 1
-                        feishu_lines.append(
-                            f"**{model_name}**: {m_action} ({m_score:+.3f}) — {m_reason}"
-                        )
-
             # Consensus line
             parts = [f"{v}×{k}" for k, v in sorted(consensus.items(), key=lambda x: -x[1])]
             consensus_str = " | ".join(parts)
@@ -2009,10 +1855,6 @@ async def ai_worker(loop: asyncio.AbstractEventLoop) -> None:
                 f"[{_now()}] [AI] news=#{f['news_id']} [{label}] FAILED:"
                 f" {error_msg}"
             )
-            # 如果是额外模型失败，打印详细信息
-            if label in ("DeepSeek", "Gemini", "Grok", "ChatGPT"):
-                print(f"  └─ 模型 {label} 请求失败，已使用 Fallback HOLD 降级")
-
         # Batch summary
         try:
             s_dt = datetime.fromisoformat(batch_start)
@@ -2653,18 +2495,13 @@ async def main():
     print("[MAIN] Trident Agent MVP - engine starting")
     print("="*50)
 
-    # 打印六模型并发矩阵配置
+    # 打印模型配置
     print(f"[MAIN] ══════════════════════════════════════════════")
-    print(f"[MAIN] 六模型并发矩阵已加载:")
+    print(f"[MAIN] 模型配置:")
     for m in MODELS:
         key_status = "✅" if m.get("api_key") else "❌"
-        if m["label"] in ("Gemini", "DeepSeek", "Grok"):
-            timeout = "20s"
-        elif m["label"] == "ChatGPT":
-            timeout = "10s"
-        else:
-            timeout = "45s"
-        print(f"[MAIN]   {key_status} {m['label']:12s} | {m['id']:35s} | Timeout: {timeout}")
+        json_mode = "Prompt-JSON" if not m.get("json_mode") else "API-JSON"
+        print(f"[MAIN]   {key_status} {m['label']:12s} | {m['id']:35s} | {json_mode} | Timeout: 45s")
     print(f"[MAIN] ══════════════════════════════════════════════")
 
     # Auto-migrate DB schema

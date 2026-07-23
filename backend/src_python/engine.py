@@ -876,6 +876,8 @@ async def websocket_ingest(loop: asyncio.AbstractEventLoop) -> None:
                                     ts = _ts()
                                     cleaned = f"[hash:{h}] {text[:500]}"
                                     f_result = evaluate_news(cleaned)
+                                    if f_result["status"] == "FILTERED":
+                                        return None  # 噪音新闻,不进入 pipeline
                                     cur = conn.execute(
                                         "INSERT INTO raw_news"
                                         " (source, content, timestamp, status, is_noise, relevance_score)"
@@ -949,6 +951,8 @@ async def websocket_ingest(loop: asyncio.AbstractEventLoop) -> None:
                                             source_label = f"{source_label} {vip_tag}"
                                         cleaned = f"[hash:{h}] {text[:500]}"
                                         f_result = evaluate_news(cleaned)
+                                        if f_result["status"] == "FILTERED":
+                                            return None  # 噪音新闻,不进入 pipeline
                                         cur = conn.execute(
                                             "INSERT INTO raw_news"
                                             " (source, content, timestamp, status, is_noise, relevance_score)"
@@ -2273,12 +2277,14 @@ def _ensure_db_exists() -> None:
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS raw_news (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                source      TEXT    NOT NULL,
-                content     TEXT    NOT NULL,
-                timestamp   TEXT    NOT NULL DEFAULT (datetime('now')),
-                status      TEXT    NOT NULL DEFAULT 'PENDING'
-                    CHECK (status IN ('PENDING', 'PROCESSING', 'DONE', 'FAILED'))
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                source          TEXT    NOT NULL,
+                content         TEXT    NOT NULL,
+                timestamp       TEXT    NOT NULL DEFAULT (datetime('now')),
+                status          TEXT    NOT NULL DEFAULT 'PENDING'
+                    CHECK (status IN ('PENDING', 'PROCESSING', 'DONE', 'FAILED')),
+                is_noise        INTEGER NOT NULL DEFAULT 0,
+                relevance_score REAL    NOT NULL DEFAULT 0.0
             );
         """)
 
@@ -2299,6 +2305,16 @@ def _ensure_db_exists() -> None:
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_decisions_status ON ai_decisions(status);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_news_status ON raw_news(status);")
+
+        # ── Migration: raw_news filter columns (realtime_filter.py Phase 2) ──
+        for col, col_def in [
+            ("is_noise",        "INTEGER NOT NULL DEFAULT 0"),
+            ("relevance_score", "REAL    NOT NULL DEFAULT 0.0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE raw_news ADD COLUMN {col} {col_def};")
+            except sqlite3.OperationalError:
+                pass
 
         # ── Migration: add aggregation columns (safe to run every startup) ──
         for col, col_def in [
@@ -2743,6 +2759,8 @@ async def _tree_news_handler(reader, writer) -> None:
                 ts = _ts()
                 cleaned = f"[hash:{h}] {text[:500]}"
                 f_result = evaluate_news(cleaned)
+                if f_result["status"] == "FILTERED":
+                    return None  # 噪音新闻,不进入 pipeline
                 cur = conn.execute(
                     "INSERT INTO raw_news (source, content, timestamp, status, is_noise, relevance_score)"
                     " VALUES (?, ?, ?, ?, ?, ?);",

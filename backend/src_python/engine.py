@@ -37,6 +37,19 @@ from dotenv import load_dotenv
 # .env 在项目根目录（backend/ 的上一层）
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", ".env"))
 
+# ── 代理注入 (Binance HTTP 451 地域限制) ──
+# ccxt 读取 HTTP_PROXY/HTTPS_PROXY 环境变量; 如果 .env 没设则手动兜底
+if not os.getenv("HTTP_PROXY") and not os.getenv("http_proxy"):
+    os.environ["http_proxy"] = "http://127.0.0.1:10808"
+    os.environ["https_proxy"] = "http://127.0.0.1:10808"
+    print("[MAIN] 自动注入代理: http://127.0.0.1:10808")
+
+# 实时新闻过滤器 — ingest 阶段拦截垃圾新闻
+from realtime_filter import evaluate_news
+
+# 市场快照 — 每轮 AI batch 前拉取一次 BTC/XAU 行情
+from market_snapshot import get_snapshot
+
 # ---------------------------------------------------------------------------
 # Optional imports — not required; kept for compatibility
 # ---------------------------------------------------------------------------
@@ -861,14 +874,19 @@ async def websocket_ingest(loop: asyncio.AbstractEventLoop) -> None:
                                     if ex:
                                         return None
                                     ts = _ts()
+                                    cleaned = f"[hash:{h}] {text[:500]}"
+                                    f_result = evaluate_news(cleaned)
                                     cur = conn.execute(
                                         "INSERT INTO raw_news"
-                                        " (source, content, timestamp)"
-                                        " VALUES (?, ?, ?);",
+                                        " (source, content, timestamp, status, is_noise, relevance_score)"
+                                        " VALUES (?, ?, ?, ?, ?, ?);",
                                         (
                                             f"WS:fj:{channel}" if channel else "WS:financialjuice",
-                                            f"[hash:{h}] {text[:500]}",
+                                            cleaned,
                                             ts,
+                                            f_result["status"],
+                                            f_result["is_noise"],
+                                            f_result["relevance_score"],
                                         ),
                                     )
                                     conn.commit()
@@ -929,14 +947,19 @@ async def websocket_ingest(loop: asyncio.AbstractEventLoop) -> None:
                                         source_label = f"WS:fj:{channel}" if channel else "WS:financialjuice"
                                         if vip_tag:
                                             source_label = f"{source_label} {vip_tag}"
+                                        cleaned = f"[hash:{h}] {text[:500]}"
+                                        f_result = evaluate_news(cleaned)
                                         cur = conn.execute(
                                             "INSERT INTO raw_news"
-                                            " (source, content, timestamp)"
-                                            " VALUES (?, ?, ?);",
+                                            " (source, content, timestamp, status, is_noise, relevance_score)"
+                                            " VALUES (?, ?, ?, ?, ?, ?);",
                                             (
                                                 source_label,
-                                                f"[hash:{h}] {text[:500]}",
+                                                cleaned,
                                                 ts,
+                                                f_result["status"],
+                                                f_result["is_noise"],
+                                                f_result["relevance_score"],
                                             ),
                                         )
                                         conn.commit()
@@ -1013,28 +1036,76 @@ _SYSTEM_PROMPT = """
   * 加密行业自身 (ETF/监管/技术) → market_category="CRYPTO", target_asset="BTC"
   * 无法归类 → market_category="OTHER", target_asset="NONE"
 
+═══ 市场上下文 ═══
+
+每条新闻的 user prompt 开头会附带实时市场快照。你必须将市场数据作为
+价格验证层与你的宏观推演交叉验证：
+  * 新闻利多 + 价格已大涨 + 资金费率极端 → 利好出尽，警惕 SELL
+  * 新闻利空 + 价格已大跌 + 资金费率负极端 → 空头拥挤，警惕 BUY
+  * 新闻方向与当前趋势一致 → continuation 信号，置信度可上调
+  * 新闻方向与当前趋势相反 → reversal 信号，置信度必须下调，需更强证据
+  * 趋势强度为 Strong Bull/Bear → reversal 信号需极高证据门槛
+  * ATR 升高 → 市场在重新定价，新闻冲击力放大
+  * 黄金趋势 Bull → 地缘冲突新闻更可能 continuation 而非 reversal
+
 ═══ JSON 输出 ═══
 
-输出 JSON（六个字段，缺一不可）：
+输出 JSON（14 个字段，缺一不可）：
 {"reasoning_path": "[驱动力]…→[水位博弈]…→[跨资产联动]…→[反共识结论]…",
  "sentiment_score": <float -1.0~1.0>,
  "suggested_action": "<BUY|SELL|HOLD>",
  "reasoning": "<一句精炼结论,<=50字>",
  "market_category": "<CRYPTO|GOLD|OIL|MACRO|OTHER>",
- "target_asset": "<BTC|ETH|XAU|WTI|...|NONE>"}
+ "target_asset": "<BTC|ETH|XAU|WTI|...|NONE>",
+ "prediction_type": "<reversal|continuation|breakout>",
+ "event_phase": "<early|mid|late>",
+ "market_confirmation": "<positive|negative|unknown>",
+ "expected_horizon": "<intraday|1-3d|1w+>",
+ "invalidation_condition": "<什么情况下这个判断失效,<=40字>",
+ "event_strength": "<low|medium|high>",
+ "direct_catalyst": <true|false>,
+ "timeframe_match": "<intraday|swing|macro>"}
+
+其中多选字段的有效值:
+  prediction_type:   reversal (反转) | continuation (趋势延续) | breakout (突破)
+  event_phase:       early (事件初期,冲击最大) | mid (事件中期,市场已定价) | late (事件末期,可能出尽)
+  market_confirmation: positive (市场已在按新闻方向走) | negative (市场表现与新闻方向背离) | unknown (无明确印证)
+  expected_horizon:  intraday | 1-3d | 1w+
+  invalidation_condition: 具体可验证的失效条件,如"BTC跌破66500则失效"
+  event_strength:   low (弱催化,盘面不会剧变) | medium (中等冲击) | high (强催化,可能引发趋势/反转)
+  direct_catalyst:  true (事件直接针对该资产,如BTC ETF获批) | false (间接传导,如宏观CPI → 通过利率预期影响BTC)
+  timeframe_match:  intraday (事件影响<24h) | swing (影响2-7天) | macro (影响数周至数月)
 
 ═══ 铁律 ═══
   * score 严禁为 0.0。中性区 +/-0.03~0.10
   * 方向不确定时 HOLD 是正确答案，不要赌
   * reasoning_path 必须包含四段推演，每段 1-2 句话
   * BTC 在战争/危机/流动性恐慌中 → SELL (纯风险资产，不存在避险属性)
+  * 市场快照价格与你的方向判断矛盾时 → confidence 降级，market_confirmation 设 negative
+  * 缺少市场数据时 market_confirmation 必须为 "unknown"
 
-只输出 JSON，六个字段缺一不可。
+═══ 历史绩效参考 ═══
+
+每条新闻的 user prompt 会附带 [Historical Performance] 区块，列出历史上类似信号的
+真实表现（2h forward-tracking 结算数据）：
+
+  * 作为研究参考，不强制修改你的判断。你是独立决策者。
+  * 如果某类信号历史上胜率极低（<30%），考虑降低置信度或选 HOLD
+  * 如果某类信号历史上胜率很高（>70%），可以适度上调置信度
+  * 如果显示 "Insufficient sample"，说明该组合样本不足，忽略即可
+  * 历史不代表未来。结合当前 market context 综合判断。
+
+只输出 JSON，14 个字段缺一不可。
 """
 
 
 _JSON_PROMPT_FORCE = """
 你是 10 亿美元对冲基金的量化决策大脑。从宏观博弈而非表面叙事中提取信号。
+
+每条新闻的 user prompt 开头附带实时市场快照。你必须将市场数据作为价格验证层：
+  新闻利多+价格已大涨+费率极端 → 警惕 SELL
+  新闻与趋势方向一致 → continuation
+  新闻与趋势方向相反 → reversal (置信度下调)
 
 每一条新闻，按以下四步推演后输出 JSON：
   1.驱动力 —— 资金面真正的含义？
@@ -1050,11 +1121,14 @@ _JSON_PROMPT_FORCE = """
 
 BTC 定性：纯风险资产，战争中 SELL，宽松中 BUY。
 不确定方向时 HOLD。score 严禁 0.0。
+市场快照价格与方向矛盾 → confidence 降级，market_confirmation=negative。
 
-JSON(六字段):
-{"reasoning_path": "[驱动力]…→[水位博弈]…→[跨资产联动]…→[反共识结论]…", "sentiment_score": <float>, "suggested_action": "<BUY|SELL|HOLD>", "reasoning": "<结论<=50字>", "market_category": "<CRYPTO|GOLD|OIL|MACRO|OTHER>", "target_asset": "<BTC|ETH|XAU|WTI|...|NONE>"}
+user prompt 中的 [Historical Performance] 是历史信号2h结算数据，作为研究参考。Insufficient sample 时忽略。
 
-只输出 JSON。六个字段缺一不可。
+JSON(14字段):
+{"reasoning_path": "...", "sentiment_score": <float>, "suggested_action": "<BUY|SELL|HOLD>", "reasoning": "<结论<=50字>", "market_category": "<CRYPTO|GOLD|OIL|MACRO|OTHER>", "target_asset": "<BTC|ETH|XAU|WTI|...|NONE>", "prediction_type": "<reversal|continuation|breakout>", "event_phase": "<early|mid|late>", "market_confirmation": "<positive|negative|unknown>", "expected_horizon": "<intraday|1-3d|1w+>", "invalidation_condition": "<失效条件,<=40字>", "event_strength": "<low|medium|high>", "direct_catalyst": <true|false>, "timeframe_match": "<intraday|swing|macro>"}
+
+只输出 JSON。14 个字段缺一不可。
 """
 
 
@@ -1076,17 +1150,137 @@ JSON 输出：
 
 
 
-def _call_llm_sync(news_content: str, model_cfg: Dict[str, str]) -> Dict[str, Any]:
+# ---------------------------------------------------------------------------
+# Phase 1 — Performance Feedback Injection
+# ---------------------------------------------------------------------------
+# Queries historical settled-signal performance for key asset × action ×
+# prediction_type combos.  Injected into the LLM prompt as research reference
+# — does NOT auto-modify LLM output.  Only the LLM decides.
+# ---------------------------------------------------------------------------
+
+# Assets and actions we care about for performance feedback
+_PERF_ASSETS = ("BTC", "XAU")
+_PERF_ACTIONS = ("BUY", "SELL")
+_PERF_PREDICTION_TYPES = ("continuation", "reversal", "breakout")
+_PERF_LOOKBACK_DAYS = 90
+# Minimum sample for "reliable" display
+_PERF_MIN_SAMPLE = 8
+
+
+def _build_performance_context() -> str:
+    """Build [Historical Performance] block for prompt injection.
+
+    Queries settled ai_decisions for each asset × action × prediction_type
+    combo.  Returns a concise multi-line string suitable for prepending to
+    the LLM user prompt.  Runs once per batch (O(1) near-instant SQL).
+    """
+    try:
+        conn = _open_db()
+    except Exception:
+        return ""
+
+    try:
+        lines: List[str] = []
+        lines.append("[Historical Performance]")
+        lines.append("Similar signals:")
+
+        # Query: for each (asset, action, prediction_type) combo
+        for asset in _PERF_ASSETS:
+            for action in _PERF_ACTIONS:
+                # ── Overall (all prediction_types) ──
+                overall = conn.execute(
+                    "SELECT COUNT(*) AS n, "
+                    "  SUM(CASE WHEN is_correct = 'WIN' THEN 1 ELSE 0 END) AS wins, "
+                    "  SUM(CASE WHEN is_correct = 'LOSS' THEN 1 ELSE 0 END) AS losses, "
+                    "  AVG(CASE WHEN forward_pnl IS NOT NULL THEN forward_pnl ELSE NULL END) AS avg_pnl "
+                    "FROM ai_decisions "
+                    "WHERE settled = 1 "
+                    "  AND is_correct IN ('WIN', 'LOSS') "
+                    "  AND target_asset = ? "
+                    "  AND suggested_action = ? "
+                    "  AND created_at >= datetime('now', 'localtime', ?)",
+                    (asset, action, f"-{_PERF_LOOKBACK_DAYS} days"),
+                ).fetchone()
+
+                for pt in _PERF_PREDICTION_TYPES:
+                    row = conn.execute(
+                        "SELECT COUNT(*) AS n, "
+                        "  SUM(CASE WHEN is_correct = 'WIN' THEN 1 ELSE 0 END) AS wins, "
+                        "  SUM(CASE WHEN is_correct = 'LOSS' THEN 1 ELSE 0 END) AS losses, "
+                        "  AVG(CASE WHEN forward_pnl IS NOT NULL THEN forward_pnl ELSE NULL END) AS avg_pnl "
+                        "FROM ai_decisions "
+                        "WHERE settled = 1 "
+                        "  AND is_correct IN ('WIN', 'LOSS') "
+                        "  AND target_asset = ? "
+                        "  AND suggested_action = ? "
+                        "  AND prediction_type = ? "
+                        "  AND created_at >= datetime('now', 'localtime', ?)",
+                        (asset, action, pt, f"-{_PERF_LOOKBACK_DAYS} days"),
+                    ).fetchone()
+
+                    n = row["n"] or 0
+                    wins = row["wins"] or 0
+                    losses = row["losses"] or 0
+                    decided = wins + losses
+                    avg_pnl = row["avg_pnl"]
+
+                    if n < _PERF_MIN_SAMPLE or decided == 0:
+                        lines.append(
+                            f"{asset} {pt} {action}: "
+                            f"Insufficient sample"
+                        )
+                    else:
+                        wr = wins / decided
+                        pnl_str = (
+                            f"{avg_pnl:+.2f}%" if avg_pnl is not None else "N/A"
+                        )
+                        lines.append(
+                            f"{asset} {pt} {action}: "
+                            f"sample: {decided} "
+                            f"win rate: {wr:.0%} "
+                            f"avg pnl: {pnl_str}"
+                        )
+
+                # ── Also add the overall (all prediction_types) line ──
+                n_all = overall["n"] or 0
+                wins_all = overall["wins"] or 0
+                losses_all = overall["losses"] or 0
+                decided_all = wins_all + losses_all
+                if decided_all >= _PERF_MIN_SAMPLE:
+                    wr_all = wins_all / decided_all
+                    pnl_all = overall["avg_pnl"]
+                    pnl_str = (
+                        f"{pnl_all:+.2f}%" if pnl_all is not None else "N/A"
+                    )
+                    lines.append(
+                        f"{asset} * {action}: "
+                        f"sample: {decided_all} "
+                        f"win rate: {wr_all:.0%} "
+                        f"avg pnl: {pnl_str}"
+                    )
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        print(f"[PERF] 查询历史绩效失败: {type(e).__name__}: {str(e)[:80]}")
+        return ""
+    finally:
+        conn.close()
+
+
+def _call_llm_sync(news_content: str, model_cfg: Dict[str, str],
+                   market_context: str = "",
+                   performance_context: str = "") -> Dict[str, Any]:
     """
     Call any OpenAI-compatible LLM API synchronously (runs in executor thread).
 
     model_cfg.keys: id, label, api_base, api_key
-    Returns: {"sentiment_score", "suggested_action", "reasoning", "model_label", "model_id"}
+    market_context:  Optional multi-line market snapshot string, prepended to user_content.
+    Returns: {"sentiment_score", "suggested_action", "reasoning", "model_label", "model_id",
+              ... + 5 metadata fields}
 
     Retry strategy: if json_mode=True produces unparseable output (keyword fallback),
-    retry once with json_mode=False (prompt-based JSON enforcement).  This handles
-    OpenRouter edge cases where response_format={"type":"json_object"} is not
-    perfectly proxied to certain models.
+    retry once with json_mode=False (prompt-based JSON enforcement).
     """
 
     # ------------------------------------------------------------------
@@ -1099,11 +1293,18 @@ def _call_llm_sync(news_content: str, model_cfg: Dict[str, str]) -> Dict[str, An
         else:
             prompt = _SYSTEM_PROMPT if use_json else _JSON_PROMPT_FORCE
 
+        # 组装 user content: [市场快照] + [历史绩效] + [新闻正文]
+        user_text = news_content[:2000]
+        if market_context:
+            user_text = market_context + "\n\n" + user_text
+        if performance_context:
+            user_text = performance_context + "\n\n" + user_text
+
         payload: Dict[str, Any] = {
             "model": model_cfg["id"],
             "messages": [
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": news_content[:2000]},
+                {"role": "user", "content": user_text},
             ],
             "max_tokens": 2048,
             "temperature": 0.1,
@@ -1234,11 +1435,47 @@ def _call_llm_sync(news_content: str, model_cfg: Dict[str, str]) -> Dict[str, An
             if not result:
                 text_lower = cleaned.lower()
                 if any(w in text_lower for w in ("利好", "上涨", "看涨", "bullish", "buy")):
-                    result = {"reasoning_path": "关键词推断 → 偏多信号", "sentiment_score": 0.4, "suggested_action": "BUY", "reasoning": "关键词推断:偏多", "market_category": "OTHER", "target_asset": "NONE"}
+                    result = {"reasoning_path": "关键词推断 → 偏多信号", "sentiment_score": 0.4, "suggested_action": "BUY", "reasoning": "关键词推断:偏多", "market_category": "OTHER", "target_asset": "NONE", "event_strength": "low", "direct_catalyst": False, "timeframe_match": "intraday"}
                 elif any(w in text_lower for w in ("利空", "下跌", "看跌", "bearish", "sell", "战争", "制裁")):
-                    result = {"reasoning_path": "关键词推断 → 偏空信号", "sentiment_score": -0.4, "suggested_action": "SELL", "reasoning": "关键词推断:偏空", "market_category": "OTHER", "target_asset": "NONE"}
+                    result = {"reasoning_path": "关键词推断 → 偏空信号", "sentiment_score": -0.4, "suggested_action": "SELL", "reasoning": "关键词推断:偏空", "market_category": "OTHER", "target_asset": "NONE", "event_strength": "low", "direct_catalyst": False, "timeframe_match": "intraday"}
                 else:
-                    result = {"reasoning_path": "关键词推断 → 中性观望", "sentiment_score": 0.05, "suggested_action": "HOLD", "reasoning": "关键词推断:观望", "market_category": "OTHER", "target_asset": "NONE"}
+                    result = {"reasoning_path": "关键词推断 → 中性观望", "sentiment_score": 0.05, "suggested_action": "HOLD", "reasoning": "关键词推断:观望", "market_category": "OTHER", "target_asset": "NONE", "event_strength": "low", "direct_catalyst": False, "timeframe_match": "intraday"}
+
+        # ── 元数据字段默认值 (LLM 可能不返回或返回无效值) ──
+        _META_DEFAULTS: Dict[str, Any] = {
+            "prediction_type":        ("reversal", "continuation", "breakout"),
+            "event_phase":            ("early", "mid", "late"),
+            "market_confirmation":    ("positive", "negative", "unknown"),
+            "expected_horizon":       ("intraday", "1-3d", "1w+"),
+            "invalidation_condition": "",
+            # Phase 2: Event Quality Layer
+            "event_strength":         ("low", "medium", "high"),
+            "timeframe_match":        ("intraday", "swing", "macro"),
+        }
+        for key, valid in _META_DEFAULTS.items():
+            if key not in result or not isinstance(result[key], str):
+                # If valid is a tuple, take the last (most conservative) value; if str, use empty
+                result[key] = valid[-1] if isinstance(valid, tuple) else valid
+            elif isinstance(valid, tuple):
+                val_lower = result[key].strip().lower()
+                # Check if the value matches any valid option (fuzzy)
+                ok = False
+                for v in valid:
+                    if v in val_lower or val_lower == v:
+                        result[key] = v  # normalize to canonical form
+                        ok = True
+                        break
+                if not ok:
+                    result[key] = valid[-1]  # default conservative
+
+        # direct_catalyst 布尔值特殊处理 (LLM 可能返回 JSON true/false 或字符串)
+        dc = result.get("direct_catalyst")
+        if isinstance(dc, bool):
+            pass  # already correct
+        elif isinstance(dc, str) and dc.strip().lower() in ("true", "1", "yes"):
+            result["direct_catalyst"] = True
+        else:
+            result["direct_catalyst"] = False
 
         return result
 
@@ -1285,6 +1522,10 @@ def _call_llm_sync(news_content: str, model_cfg: Dict[str, str]) -> Dict[str, An
             "reasoning_path": "",
             "model_label": model_cfg["label"],
             "model_id": model_cfg["id"],
+            # Phase 2: Event Quality Layer (Doubao 不输出这些 → 默认值)
+            "event_strength": "medium",
+            "direct_catalyst": False,
+            "timeframe_match": "intraday",
         }
 
     # Validate & normalise fields
@@ -1336,6 +1577,10 @@ def _call_llm_sync(news_content: str, model_cfg: Dict[str, str]) -> Dict[str, An
         "reasoning_path": reasoning_path,
         "model_label": model_cfg["label"],
         "model_id": model_cfg["id"],
+        # Phase 2: Event Quality Layer
+        "event_strength": result.get("event_strength", "medium"),
+        "direct_catalyst": bool(result.get("direct_catalyst", False)),
+        "timeframe_match": result.get("timeframe_match", "intraday"),
     }
 
 
@@ -1352,12 +1597,17 @@ async def _process_single(
     news_row: sqlite3.Row,
     model_cfg: Dict[str, str],
     loop: asyncio.AbstractEventLoop,
+    market_context: str = "",
+    performance_context: str = "",
 ) -> Dict[str, Any]:
     """
     Process a single raw_news row through ONE model's LLM pipeline (Kimi K3).
 
     单模型模式：Kimi K3 使用 45 秒超时（在 _call_llm_sync 内部 urllib timeout=45s）。
     信号量控制并发上限，避免突发新闻潮打爆 OpenRouter。
+
+    market_context:  注入到 User Prompt 的市场快照字符串。
+    performance_context: 注入到 User Prompt 的历史绩效字符串（Phase 1）。
 
     Returns:
       {"news_id": int, "pre_ts": str, "model_label": str,
@@ -1370,7 +1620,8 @@ async def _process_single(
     try:
         async with _LLM_SEMAPHORE:
             llm_result = await loop.run_in_executor(
-                None, _call_llm_sync, content, model_cfg,
+                None, _call_llm_sync, content, model_cfg, market_context,
+                performance_context,
             )
         return {
             "news_id": news_id,
@@ -1388,6 +1639,14 @@ async def _process_single(
             "market_category": "OTHER",
             "target_asset": "NONE",
             "reasoning_path": "",
+            "prediction_type": "continuation",
+            "event_phase": "mid",
+            "market_confirmation": "unknown",
+            "expected_horizon": "1-3d",
+            "invalidation_condition": "系统异常,无失效条件",
+            "event_strength": "low",
+            "direct_catalyst": False,
+            "timeframe_match": "intraday",
             "model_label": model_cfg["label"],
             "model_id": model_cfg["id"],
         }
@@ -1540,6 +1799,10 @@ async def ai_worker(loop: asyncio.AbstractEventLoop) -> None:
 
     idle_ticks = 0  # heartbeat counter when no PENDING data
 
+    # 失败冷却: snapshot 连续 DOWN 后 5 分钟内不重试, 减少无意义等待
+    _SNAPSHOT_COOLDOWN_S = 300
+    _last_snapshot_down_ts: float = 0.0
+
     while True:
         await asyncio.sleep(1)
 
@@ -1574,6 +1837,51 @@ async def ai_worker(loop: asyncio.AbstractEventLoop) -> None:
             finally:
                 conn.close()
 
+        # ==================================================================
+        # Phase 0 — Pull market snapshot (once per batch, before LLM calls)
+        # ==================================================================
+
+        market_context = ""
+        decision_context = "{}"  # 完整快照 JSON, 供 Hermes 复盘
+        now_ts = time.time()
+        if now_ts - _last_snapshot_down_ts > _SNAPSHOT_COOLDOWN_S:
+            try:
+                snap = await get_snapshot()
+                market_context = snap.get("summary", "")
+                decision_context = json.dumps(snap, ensure_ascii=False)
+                if market_context:
+                    print(f"\n  [SNAPSHOT] {snap['status'].upper()} | "
+                          f"BTC={snap['assets']['BTC'].get('price_str','?')} | "
+                          f"XAU={snap['assets']['XAU'].get('price_str','?')}")
+                if snap['status'] == 'down':
+                    _last_snapshot_down_ts = now_ts
+            except Exception as e:
+                print(f"  [SNAPSHOT] 获取失败: {type(e).__name__}: {str(e)[:80]}")
+                market_context = ""
+                decision_context = json.dumps({"error": str(e), "status": "down"}, ensure_ascii=False)
+                _last_snapshot_down_ts = now_ts
+        else:
+            # 冷却中, 跳过本轮 snapshot 请求
+            remaining = _SNAPSHOT_COOLDOWN_S - int(now_ts - _last_snapshot_down_ts)
+            market_context = ""
+            decision_context = json.dumps({"status": "down", "cooldown": True}, ensure_ascii=False)
+            if int(now_ts) % 60 == 0:  # 每分钟只打一次
+                print(f"  [SNAPSHOT] 跳过 (冷却中, {remaining}s 后重试)")
+
+        # ==================================================================
+        # Phase 0.5 — Build historical performance reference (once per batch)
+        # ==================================================================
+        performance_context = ""
+        try:
+            performance_context = await loop.run_in_executor(
+                None, _build_performance_context,
+            )
+            if performance_context:
+                print(f"  [PERF] 历史绩效已注入 prompt ({len(performance_context)} chars)")
+        except Exception as e:
+            print(f"  [PERF] 构建失败: {type(e).__name__}: {str(e)[:80]}")
+            performance_context = ""
+
         batch = await loop.run_in_executor(None, _batch_claim)
         if not batch:
             idle_ticks += 1
@@ -1600,7 +1908,7 @@ async def ai_worker(loop: asyncio.AbstractEventLoop) -> None:
         # ==================================================================
         batch_start = _ts()
         tasks = [
-            _process_single(row, model_cfg, loop)
+            _process_single(row, model_cfg, loop, market_context, performance_context)
             for row in batch
             for model_cfg in MODELS
         ]
@@ -1681,13 +1989,31 @@ async def ai_worker(loop: asyncio.AbstractEventLoop) -> None:
                             )
                             parent_cache[agg_key] = parent_id
 
+                    # ── 元数据提取 (LLM 可能不返回 → 默认值兜底) ──
+                    pred_type = res.get("prediction_type", "continuation")
+                    evt_phase = res.get("event_phase", "mid")
+                    mkt_confirm = res.get("market_confirmation", "unknown")
+                    exp_horizon = res.get("expected_horizon", "1-3d")
+                    inval_cond = res.get("invalidation_condition", "")
+                    # Phase 2: Event Quality Layer
+                    evt_strength = res.get("event_strength", "medium")
+                    direct_cat = 1 if res.get("direct_catalyst", False) else 0
+                    tf_match = res.get("timeframe_match", "intraday")
+
                     cur = conn.execute(
                         """
                         INSERT INTO ai_decisions
                           (news_id, sentiment_score, suggested_action,
                            reasoning, created_at, market_category, target_asset,
-                           parent_id, child_count, aggregation_key, reasoning_path, vip_tag)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?);
+                           parent_id, child_count, aggregation_key, reasoning_path, vip_tag,
+                           prediction_type, event_phase, market_confirmation,
+                           expected_horizon, invalidation_condition,
+                           event_strength, direct_catalyst, timeframe_match,
+                           decision_context)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?,
+                                ?, ?, ?, ?, ?,
+                                ?, ?, ?,
+                                ?);
                         """,
                         (
                             nid,
@@ -1701,6 +2027,15 @@ async def ai_worker(loop: asyncio.AbstractEventLoop) -> None:
                             agg_key if parent_id is None else "",
                             res.get("reasoning_path", ""),
                             vip_tag,
+                            pred_type,
+                            evt_phase,
+                            mkt_confirm,
+                            exp_horizon,
+                            inval_cond[:200],  # 截断超长失效条件
+                            evt_strength,
+                            direct_cat,
+                            tf_match,
+                            decision_context,
                         ),
                     )
                     decision_id = cur.lastrowid
@@ -2047,6 +2382,29 @@ def _ensure_db_exists() -> None:
             except sqlite3.OperationalError:
                 pass
 
+        # ── Outcome tracking metrics (Phase 0.5: Decision→Context→Outcome 闭环) ──
+        for col, col_def in [
+            ("mfe_pct",        "REAL    DEFAULT NULL"),   # Maximum Favourable Excursion (%)
+            ("mae_pct",        "REAL    DEFAULT NULL"),   # Maximum Adverse Excursion (%)
+            ("forward_pnl",    "REAL    DEFAULT NULL"),   # Net PnL at settlement (signed %)
+            ("mfe_time_mins",  "REAL    DEFAULT NULL"),   # Minutes from entry to MFE peak
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE ai_decisions ADD COLUMN {col} {col_def};")
+            except sqlite3.OperationalError:
+                pass
+
+        # ── Phase 2: Event Quality Layer (事件质量元数据) ──
+        for col, col_def in [
+            ("event_strength",    "TEXT    DEFAULT 'medium'"),    # low | medium | high
+            ("direct_catalyst",   "INTEGER DEFAULT 0"),           # 0=false, 1=true
+            ("timeframe_match",   "TEXT    DEFAULT 'intraday'"),  # intraday | swing | macro
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE ai_decisions ADD COLUMN {col} {col_def};")
+            except sqlite3.OperationalError:
+                pass
+
         conn.commit()
     finally:
         conn.close()
@@ -2369,9 +2727,13 @@ async def _tree_news_handler(reader, writer) -> None:
                 if vip_tag:
                     source_label = f"{source_label} {vip_tag}"
                 ts = _ts()
+                cleaned = f"[hash:{h}] {text[:500]}"
+                f_result = evaluate_news(cleaned)
                 cur = conn.execute(
-                    "INSERT INTO raw_news (source, content, timestamp) VALUES (?, ?, ?);",
-                    (source_label, f"[hash:{h}] {text[:500]}", ts),
+                    "INSERT INTO raw_news (source, content, timestamp, status, is_noise, relevance_score)"
+                    " VALUES (?, ?, ?, ?, ?, ?);",
+                    (source_label, cleaned, ts,
+                     f_result["status"], f_result["is_noise"], f_result["relevance_score"]),
                 )
                 conn.commit()
                 return cur.lastrowid
@@ -2488,14 +2850,30 @@ async def forward_tracker() -> None:
                                 # Catch-all: e.g. MFE hit but too slow (>45min), or tie
                                 verdict = "HOLD"    # NOT_DRIVEN — late/sector move, not news-driven
 
+                            # ── forward_pnl: signed PnL % from entry to exit ──
+                            fwd_pnl: float = 0.0
+                            if entry and entry > 0 and exit_p is not None:
+                                if action == "BUY":
+                                    fwd_pnl = (exit_p - entry) / entry * 100
+                                elif action == "SELL":
+                                    fwd_pnl = (entry - exit_p) / entry * 100
+                                else:
+                                    fwd_pnl = 0.0
+
                             conn.execute(
-                                "UPDATE ai_decisions SET exit_price = ?, is_correct = ?, settled = 1 WHERE id = ?",
-                                (round(exit_p, 2), verdict, eid),
+                                "UPDATE ai_decisions SET exit_price = ?, is_correct = ?,"
+                                " settled = 1, mfe_pct = ?, mae_pct = ?, forward_pnl = ?,"
+                                " mfe_time_mins = ? WHERE id = ?",
+                                (round(exit_p, 2), verdict,
+                                 round(mfe_pct, 4), round(mae_pct, 4), round(fwd_pnl, 4),
+                                 round(mfe_time_mins, 1), eid),
                             )
                             conn.commit()
                             updates.append({
                                 "id": eid, "asset": asset_raw, "action": action,
                                 "entry": entry, "exit": round(exit_p, 2), "verdict": verdict,
+                                "mfe": round(mfe_pct, 4), "mae": round(mae_pct, 4),
+                                "forward_pnl": round(fwd_pnl, 4), "mfe_mins": round(mfe_time_mins, 1),
                             })
                         elif price is not None:
                             now_unix = int(time.time())
@@ -2529,7 +2907,8 @@ async def forward_tracker() -> None:
             for s in settled:
                 print(
                     f"  [{_now()}] SETTLED #{s['id']} {s['action']} {s['asset']}"
-                                 f" | entry={s['entry']} exit={s['exit']} -> {s['verdict']}"
+                    f" | entry={s['entry']} exit={s['exit']} -> {s['verdict']}"
+                    f" | MFE={s.get('mfe', 0):+.2f}% MAE={s.get('mae', 0):+.2f}% PnL={s.get('forward_pnl', 0):+.2f}%"
                 )
 
         except Exception as e:

@@ -105,6 +105,18 @@ def _row_to_event(row) -> Dict[str, Any]:
         "gemini_reasoning": (consensus.get("Gemini", {}) if isinstance(consensus.get("Gemini"), dict) else {}).get("reasoning") or _safe(row, "gemini_reasoning") or "",
         "grok_action": (consensus.get("Grok", {}) if isinstance(consensus.get("Grok"), dict) else {}).get("action") or _safe(row, "grok_action") or "HOLD",
         "grok_reasoning": (consensus.get("Grok", {}) if isinstance(consensus.get("Grok"), dict) else {}).get("reasoning") or _safe(row, "grok_reasoning") or "",
+        # ── Phase 0: 元数据字段 ──
+        "prediction_type": _safe(row, "prediction_type") or "continuation",
+        "event_phase": _safe(row, "event_phase") or "mid",
+        "market_confirmation": _safe(row, "market_confirmation") or "unknown",
+        "expected_horizon": _safe(row, "expected_horizon") or "1-3d",
+        "invalidation_condition": _safe(row, "invalidation_condition") or "",
+        "decision_context": _safe(row, "decision_context") or "{}",
+        # ── Phase 0.5: 结果追踪指标 ──
+        "mfe_pct": _safe(row, "mfe_pct"),
+        "mae_pct": _safe(row, "mae_pct"),
+        "forward_pnl": _safe(row, "forward_pnl"),
+        "mfe_time_mins": _safe(row, "mfe_time_mins"),
         "chatgpt_action": (consensus.get("ChatGPT", {}) if isinstance(consensus.get("ChatGPT"), dict) else {}).get("action") or _safe(row, "chatgpt_action") or "HOLD",
         "chatgpt_reasoning": (consensus.get("ChatGPT", {}) if isinstance(consensus.get("ChatGPT"), dict) else {}).get("reasoning") or _safe(row, "chatgpt_reasoning") or "",
         "cluster_size": _safe(row, "cluster_size") or 1,
@@ -168,7 +180,17 @@ async def _fetch_rows_since(last_id: int) -> List[Dict[str, Any]]:
                 ad.doubao_reasoning,
                 ad.extra_models_consensus,
                 ad.entry_time,
-                ad.cluster_size
+                ad.cluster_size,
+                ad.prediction_type,
+                ad.event_phase,
+                ad.market_confirmation,
+                ad.expected_horizon,
+                ad.invalidation_condition,
+                ad.decision_context,
+                ad.mfe_pct,
+                ad.mae_pct,
+                ad.forward_pnl,
+                ad.mfe_time_mins
             FROM ai_decisions ad
             INNER JOIN raw_news rn ON rn.id = ad.news_id
             WHERE ad.id > ?
@@ -582,7 +604,17 @@ async def get_events() -> List[Dict[str, Any]]:
                 ad.doubao_reasoning,
                 ad.extra_models_consensus,
                 ad.entry_time,
-                ad.cluster_size
+                ad.cluster_size,
+                ad.prediction_type,
+                ad.event_phase,
+                ad.market_confirmation,
+                ad.expected_horizon,
+                ad.invalidation_condition,
+                ad.decision_context,
+                ad.mfe_pct,
+                ad.mae_pct,
+                ad.forward_pnl,
+                ad.mfe_time_mins
             FROM ai_decisions ad
             INNER JOIN raw_news rn ON rn.id = ad.news_id
             ORDER BY ad.id DESC
@@ -668,7 +700,17 @@ async def _do_export_excel():
                 ad.max_price_time, ad.min_price_time,
                 ad.entry_time,
                 ad.is_correct,
-                ad.cluster_size
+                ad.cluster_size,
+                ad.prediction_type,
+                ad.event_phase,
+                ad.market_confirmation,
+                ad.expected_horizon,
+                ad.invalidation_condition,
+                ad.decision_context,
+                ad.mfe_pct,
+                ad.mae_pct,
+                ad.forward_pnl,
+                ad.mfe_time_mins
             FROM ai_decisions ad
             INNER JOIN raw_news rn ON rn.id = ad.news_id
             WHERE date(ad.created_at) >= date('now', 'localtime', '-5 days')

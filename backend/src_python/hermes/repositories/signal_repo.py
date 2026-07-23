@@ -91,7 +91,8 @@ class SignalRepository(BaseRepository):
         if with_forward_tracking:
             columns += (
                 ", entry_price, exit_price, max_price, min_price, "
-                "is_correct, settled, entry_time"
+                "is_correct, settled, entry_time, mfe_pct, mae_pct, "
+                "forward_pnl, mfe_time_mins"
             )
 
         sql = f"SELECT {columns} FROM ai_decisions WHERE created_at >= datetime('now', 'localtime', ?)"
@@ -166,10 +167,25 @@ class SignalRepository(BaseRepository):
         """
         params: List[Any] = [f"-{days} days"]
 
-        # Forward-pnl may not exist on older DBs — include if present
-        pnl_col = "forward_pnl" if self._column_exists("ai_decisions", "forward_pnl") else None
+        # Forward-pnl / outcome metrics — may not exist on older DBs
+        pnl_col = self._column_exists("ai_decisions", "forward_pnl")
+        mfe_col = self._column_exists("ai_decisions", "mfe_pct")
+        mae_col = self._column_exists("ai_decisions", "mae_pct")
 
         settled_clause = "AND settled = 1" if require_settled else ""
+
+        extra_select: List[str] = []
+        if pnl_col:
+            extra_select.append(
+                "AVG(CASE WHEN settled = 1 THEN forward_pnl ELSE NULL END) AS avg_forward_pnl")
+            extra_select.append(
+                "SUM(CASE WHEN settled = 1 THEN forward_pnl ELSE 0 END) AS total_pnl")
+        if mfe_col:
+            extra_select.append(
+                "AVG(CASE WHEN settled = 1 THEN mfe_pct ELSE NULL END) AS avg_mfe_pct")
+        if mae_col:
+            extra_select.append(
+                "AVG(CASE WHEN settled = 1 THEN mae_pct ELSE NULL END) AS avg_mae_pct")
 
         sql = (
             "SELECT "
@@ -177,10 +193,12 @@ class SignalRepository(BaseRepository):
             "  SUM(CASE WHEN settled = 1 THEN 1 ELSE 0 END) AS settled_count, "
             "  SUM(CASE WHEN settled = 1 AND is_correct = '1' THEN 1 ELSE 0 END) AS win_count, "
             "  SUM(CASE WHEN settled = 1 AND is_correct = '0' THEN 1 ELSE 0 END) AS loss_count, "
-            "  AVG(CASE WHEN settled = 1 THEN ABS(sentiment_score) ELSE NULL END) AS avg_abs_score "
-            f"{', AVG(CASE WHEN settled = 1 THEN forward_pnl ELSE NULL END) AS avg_forward_pnl' if pnl_col else ''}"
-            f"{', SUM(CASE WHEN settled = 1 THEN forward_pnl ELSE 0 END) AS total_pnl' if pnl_col else ''}"
-            "FROM ai_decisions "
+            "  AVG(CASE WHEN settled = 1 THEN ABS(sentiment_score) ELSE NULL END) AS avg_abs_score"
+        )
+        if extra_select:
+            sql += ", " + ", ".join(extra_select)
+        sql += (
+            " FROM ai_decisions "
             "WHERE created_at >= datetime('now', 'localtime', ?)"
         )
 
@@ -228,6 +246,10 @@ class SignalRepository(BaseRepository):
         if pnl_col:
             result["avg_forward_pnl"] = round(row["avg_forward_pnl"] or 0.0, 6)
             result["total_pnl"] = round(row["total_pnl"] or 0.0, 6)
+        if mfe_col:
+            result["avg_mfe_pct"] = round(row["avg_mfe_pct"] or 0.0, 6)
+        if mae_col:
+            result["avg_mae_pct"] = round(row["avg_mae_pct"] or 0.0, 6)
         return result
 
     def get_score_by_outcome(

@@ -2321,6 +2321,20 @@ def _ensure_db_exists() -> None:
             "CREATE INDEX IF NOT EXISTS idx_ai_agg_key ON ai_decisions(aggregation_key);"
         )
 
+        # ── Migration: LLM metadata columns (Phase 1.0+) — may be missing on old DBs ──
+        for col, col_def in [
+            ("prediction_type",        "TEXT    DEFAULT 'continuation'"),
+            ("event_phase",            "TEXT    DEFAULT 'mid'"),
+            ("market_confirmation",    "TEXT    DEFAULT 'unknown'"),
+            ("expected_horizon",       "TEXT    DEFAULT '1-3d'"),
+            ("invalidation_condition", "TEXT    DEFAULT ''"),
+            ("decision_context",       "TEXT    DEFAULT '{}'"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE ai_decisions ADD COLUMN {col} {col_def};")
+            except sqlite3.OperationalError:
+                pass
+
         # reasoning_path column (may not exist in old DBs)
         try:
             conn.execute(

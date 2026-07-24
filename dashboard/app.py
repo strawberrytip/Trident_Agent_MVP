@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone, time as dtime
 from typing import Any, Dict, List, Optional, Tuple
@@ -447,7 +448,7 @@ BINANCE_KLINE_SYMBOLS: Dict[str, str] = {
     "OIL": "XAUUSDT",
 }
 
-PROXY_URL = "http://127.0.0.1:10808"
+PROXY_URL = os.getenv("HTTP_PROXY", "").strip() or os.getenv("http_proxy", "").strip()
 BINANCE_KLINE_URL = "https://fapi.binance.com/fapi/v1/klines"
 
 
@@ -510,7 +511,7 @@ def fetch_kline_data(
                 "endTime": end_ts,
                 "limit": 1000,
             },
-            proxies={"http": PROXY_URL, "https": PROXY_URL},
+            proxies={"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None,
             timeout=30,
         )
         resp.raise_for_status()
@@ -1021,7 +1022,7 @@ def main():
                 ⚠️ 无法获取K线数据
 
                 可能的原因：
-                1. 币安API网络连接问题（确认代理 127.0.0.1:10808 已开启）
+                1. 币安API网络连接问题（直连模式，检查防火墙或网络策略）
                 2. 该时间段品种无成交
                 3. 品种代码映射错误
 

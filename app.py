@@ -1,7 +1,7 @@
 import os
-# 依然保留系统级代理注入 (防患于未然)
-os.environ['http_proxy'] = 'http://127.0.0.1:10808'
-os.environ['https_proxy'] = 'http://127.0.0.1:10808'
+# 代理从 .env 读取，不再硬编码
+if not os.getenv("HTTP_PROXY") and not os.getenv("http_proxy"):
+    pass  # 直连模式 — 服务器端无需代理
 
 import streamlit as st
 import pandas as pd
@@ -127,17 +127,16 @@ def main():
             try:
                 print(f"[DEBUG] 开始初始化 CCXT 交易所...", file=sys.stderr)
 
-                # 【修复2】硬核限制 CCXT 只看 U 本位合约，并且双重挂载代理
+                # 代理从 .env 读取
+                _proxy = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
+                _proxies = {"http": _proxy, "https": _proxy} if _proxy else {}
                 exchange = ccxt.binance({
-                    'timeout': 10000,           # 总体超时 10 秒
-                    'connectTimeout': 5000,      # 连接超时 5 秒
+                    'timeout': 10000,
+                    'connectTimeout': 5000,
                     'enableRateLimit': True,
-                    'proxies': {
-                        'http': 'http://127.0.0.1:10808',
-                        'https': 'http://127.0.0.1:10808',
-                    },
+                    'proxies': _proxies,
                     'options': {
-                        'defaultType': 'future',  # 核心魔法：强制拉取 U 本位合约 (USDT-M Futures) 数据
+                        'defaultType': 'future',
                     }
                 })
 

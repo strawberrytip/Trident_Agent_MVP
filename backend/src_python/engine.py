@@ -37,12 +37,14 @@ from dotenv import load_dotenv
 # .env 在项目根目录（backend/ 的上一层）
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", ".env"))
 
-# ── 代理注入 (Binance HTTP 451 地域限制) ──
-# ccxt 读取 HTTP_PROXY/HTTPS_PROXY 环境变量; 如果 .env 没设则手动兜底
-if not os.getenv("HTTP_PROXY") and not os.getenv("http_proxy"):
-    os.environ["http_proxy"] = "http://127.0.0.1:10808"
-    os.environ["https_proxy"] = "http://127.0.0.1:10808"
-    print("[MAIN] 自动注入代理: http://127.0.0.1:10808")
+# ── 代理注入 — 完全由 .env / 环境变量控制 ──
+# 本地 Windows: .env 设置 HTTP_PROXY=http://127.0.0.1:10808
+# 服务器首尔:  不设代理, 直连即可
+_proxy_set = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
+if _proxy_set:
+    print(f"[MAIN] 代理已配置: {_proxy_set}")
+else:
+    print("[MAIN] 无代理, 直连模式")
 
 # 实时新闻过滤器 — ingest 阶段拦截垃圾新闻
 from realtime_filter import evaluate_news
@@ -853,31 +855,36 @@ async def websocket_ingest(loop: asyncio.AbstractEventLoop) -> None:
                     if text:
                         text = _clean_html(text)
                         if not _is_content_junk(text) and not text.startswith("http"):
+                            original_text = text
+
+                            # ── 去重检查 (翻译前 — 省 API 调用) ──
+                            h = hashlib.sha256(original_text.encode()).hexdigest()[:16]
+                            def _check_dup(hash_val: str) -> bool:
+                                conn = _open_db()
+                                try:
+                                    ex = conn.execute(
+                                        "SELECT id FROM raw_news WHERE content LIKE ? LIMIT 1",
+                                        (f"[hash:{hash_val}]%",),
+                                    ).fetchone()
+                                    return ex is not None
+                                finally:
+                                    conn.close()
+                            if await loop.run_in_executor(None, _check_dup, h):
+                                continue  # 已处理过, 跳过
+
                             # ═════════════════════════════════════════════════════════════════════
                             # PRE-TRANSLATOR INTERCEPTOR (WebSocket 入口)
                             # ═════════════════════════════════════════════════════════════════════
-                            original_text = text
-                            text = await _translate_if_english(text, loop)
+                            text = await _translate_if_english(original_text, loop)
                             if text != original_text:
                                 print(f"  [WS-TRANSLATE] {original_text[:30]} → {text[:30]}")
-
-                            h = hashlib.sha256(text.encode()).hexdigest()[:16]
 
                             def _insert_push() -> int | None:
                                 conn = _open_db()
                                 try:
-                                    ex = conn.execute(
-                                        "SELECT id FROM raw_news"
-                                        " WHERE content LIKE ? LIMIT 1",
-                                        (f"[hash:{h}]%",),
-                                    ).fetchone()
-                                    if ex:
-                                        return None
                                     ts = _ts()
                                     cleaned = f"[hash:{h}] {text[:500]}"
                                     f_result = evaluate_news(cleaned)
-                                    if f_result["status"] == "FILTERED":
-                                        return None  # 噪音新闻,不进入 pipeline
                                     cur = conn.execute(
                                         "INSERT INTO raw_news"
                                         " (source, content, timestamp, status, is_noise, relevance_score)"
@@ -886,7 +893,7 @@ async def websocket_ingest(loop: asyncio.AbstractEventLoop) -> None:
                                             f"WS:fj:{channel}" if channel else "WS:financialjuice",
                                             cleaned,
                                             ts,
-                                            f_result["status"],
+                                            "PENDING",  # 统一用 PENDING, is_noise 区分噪音
                                             f_result["is_noise"],
                                             f_result["relevance_score"],
                                         ),
@@ -924,15 +931,29 @@ async def websocket_ingest(loop: asyncio.AbstractEventLoop) -> None:
                         if text:
                             text = _clean_html(text)
                             if not _is_content_junk(text) and not text.startswith("http"):
+                                original_text = text
+
+                                # ── 去重检查 (翻译前) ──
+                                h = hashlib.sha256(original_text.encode()).hexdigest()[:16]
+                                def _check_dup2(hash_val: str) -> bool:
+                                    conn = _open_db()
+                                    try:
+                                        ex = conn.execute(
+                                            "SELECT id FROM raw_news WHERE content LIKE ? LIMIT 1",
+                                            (f"[hash:{hash_val}]%",),
+                                        ).fetchone()
+                                        return ex is not None
+                                    finally:
+                                        conn.close()
+                                if await loop.run_in_executor(None, _check_dup2, h):
+                                    continue
+
                                 # ═════════════════════════════════════════════════════════════════════
                                 # PRE-TRANSLATOR INTERCEPTOR (Result 分支)
                                 # ═════════════════════════════════════════════════════════════════════
-                                original_text = text
-                                text = await _translate_if_english(text, loop)
+                                text = await _translate_if_english(original_text, loop)
                                 if text != original_text:
                                     print(f"  [WS-TRANSLATE] {original_text[:30]} → {text[:30]}")
-
-                                h = hashlib.sha256(text.encode()).hexdigest()[:16]
 
                                 def _insert() -> int | None:
                                     conn = _open_db()
@@ -951,8 +972,6 @@ async def websocket_ingest(loop: asyncio.AbstractEventLoop) -> None:
                                             source_label = f"{source_label} {vip_tag}"
                                         cleaned = f"[hash:{h}] {text[:500]}"
                                         f_result = evaluate_news(cleaned)
-                                        if f_result["status"] == "FILTERED":
-                                            return None  # 噪音新闻,不进入 pipeline
                                         cur = conn.execute(
                                             "INSERT INTO raw_news"
                                             " (source, content, timestamp, status, is_noise, relevance_score)"
@@ -961,7 +980,7 @@ async def websocket_ingest(loop: asyncio.AbstractEventLoop) -> None:
                                                 source_label,
                                                 cleaned,
                                                 ts,
-                                                f_result["status"],
+                                                "PENDING",  # 统一用 PENDING, is_noise 区分噪音
                                                 f_result["is_noise"],
                                                 f_result["relevance_score"],
                                             ),
@@ -1818,7 +1837,7 @@ async def ai_worker(loop: asyncio.AbstractEventLoop) -> None:
             try:
                 conn.execute("BEGIN IMMEDIATE;")
                 rows = conn.execute(
-                    "SELECT * FROM raw_news WHERE status = 'PENDING'"
+                    "SELECT * FROM raw_news WHERE status = 'PENDING' AND is_noise = 0"
                     " ORDER BY id ASC LIMIT ?",
                     (BATCH_SIZE,),
                 ).fetchall()
@@ -2722,11 +2741,29 @@ async def _tree_news_handler(reader, writer) -> None:
 
         text = str(data.get("text", data.get("content", data.get("message", "")))).strip()
         source = str(data.get("source", "tree_news")).strip()[:64]
+        original_text = text
 
         # ── Pre-filter: hard blacklist + junk detection ──
         if _is_content_junk(text):
             print(f"\n  [{_now()}] [Filter] Ignored junk content: {text[:80]}")
             _send_response(204, "No Content", json.dumps({"ok": True, "filtered": True, "reason": "junk"}))
+            await writer.drain()
+            return
+
+        # ── 去重检查 (翻译前 — 省 API 调用) ──
+        h = hashlib.sha256(original_text.encode()).hexdigest()[:16]
+        def _check_dup_web(hash_val: str) -> bool:
+            conn = _open_db()
+            try:
+                ex = conn.execute(
+                    "SELECT id FROM raw_news WHERE content LIKE ? LIMIT 1",
+                    (f"[hash:{hash_val}]%",),
+                ).fetchone()
+                return ex is not None
+            finally:
+                conn.close()
+        if await loop.run_in_executor(None, _check_dup_web, h):
+            _send_response(204, "No Content", json.dumps({"ok": True, "filtered": True, "reason": "duplicate"}))
             await writer.drain()
             return
 
@@ -2736,13 +2773,11 @@ async def _tree_news_handler(reader, writer) -> None:
         # 检测英文新闻并立即翻译，确保后续所有处理（数据库 INSERT + 6 模型推演）
         # 统一使用中文标题。这是关注点分离的关键：翻译逻辑完全前置，模型专注推演。
         # ═════════════════════════════════════════════════════════════════════
-        original_text = text
-        text = await _translate_if_english(text, loop)
+        text = await _translate_if_english(original_text, loop)
         if text != original_text:
             print(f"  [{_now()}] [TRANSLATE] English → Chinese: {original_text[:40]} → {text[:40]}")
 
         vip_tag, vip_name = _detect_vip(text)
-        h = hashlib.sha256(text.encode()).hexdigest()[:16]
 
         def _webhook_insert() -> int | None:
             conn = _open_db()
@@ -2759,13 +2794,12 @@ async def _tree_news_handler(reader, writer) -> None:
                 ts = _ts()
                 cleaned = f"[hash:{h}] {text[:500]}"
                 f_result = evaluate_news(cleaned)
-                if f_result["status"] == "FILTERED":
-                    return None  # 噪音新闻,不进入 pipeline
                 cur = conn.execute(
                     "INSERT INTO raw_news (source, content, timestamp, status, is_noise, relevance_score)"
                     " VALUES (?, ?, ?, ?, ?, ?);",
                     (source_label, cleaned, ts,
-                     f_result["status"], f_result["is_noise"], f_result["relevance_score"]),
+                     "PENDING",  # 统一用 PENDING, is_noise 区分噪音
+                     f_result["is_noise"], f_result["relevance_score"]),
                 )
                 conn.commit()
                 return cur.lastrowid

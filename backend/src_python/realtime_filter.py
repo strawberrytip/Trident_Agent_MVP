@@ -261,7 +261,7 @@ _OPENROUTER_URL = "https://openrouter.ai/api/v1"
 # Override with REALTIME_FILTER_MODEL.
 _FILTER_MODEL = os.getenv(
     "REALTIME_FILTER_MODEL",
-    "anthropic/claude-haiku-latest",
+    "deepseek/deepseek-chat",
 )
 # Timeout in seconds (L2 must return fast or we bail)
 _FILTER_TIMEOUT_S = float(os.getenv("REALTIME_FILTER_TIMEOUT_S", "3.0"))

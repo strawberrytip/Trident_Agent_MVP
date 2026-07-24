@@ -1063,6 +1063,8 @@ _SYSTEM_PROMPT = """
 
 每条新闻的 user prompt 开头会附带实时市场快照。你必须将市场数据作为
 价格验证层与你的宏观推演交叉验证：
+  * user prompt 中的 [新闻时间] 是你分析的参考时间点。历史回测时，请以
+    该时间点的市场状态做判断，不要假设"未来"会发生什么。
   * 新闻利多 + 价格已大涨 + 资金费率极端 → 利好出尽，警惕 SELL
   * 新闻利空 + 价格已大跌 + 资金费率负极端 → 空头拥挤，警惕 BUY
   * 新闻方向与当前趋势一致 → continuation 信号，置信度可上调
@@ -1125,7 +1127,8 @@ _SYSTEM_PROMPT = """
 _JSON_PROMPT_FORCE = """
 你是 10 亿美元对冲基金的量化决策大脑。从宏观博弈而非表面叙事中提取信号。
 
-每条新闻的 user prompt 开头附带实时市场快照。你必须将市场数据作为价格验证层：
+每条新闻的 user prompt 开头附带实时市场快照和 [新闻时间]。你必须将市场数据作为价格验证层：
+  以 [新闻时间] 为参考点做判断，不要假设未来信息。
   新闻利多+价格已大涨+费率极端 → 警惕 SELL
   新闻与趋势方向一致 → continuation
   新闻与趋势方向相反 → reversal (置信度下调)
@@ -1293,12 +1296,15 @@ def _build_performance_context() -> str:
 
 def _call_llm_sync(news_content: str, model_cfg: Dict[str, str],
                    market_context: str = "",
-                   performance_context: str = "") -> Dict[str, Any]:
+                   performance_context: str = "",
+                   news_timestamp: str = "") -> Dict[str, Any]:
     """
     Call any OpenAI-compatible LLM API synchronously (runs in executor thread).
 
     model_cfg.keys: id, label, api_base, api_key
     market_context:  Optional multi-line market snapshot string, prepended to user_content.
+    news_timestamp:  ISO datetime string of the news event — prepended so AI knows the
+                     historical time point when replaying old news for backtesting.
     Returns: {"sentiment_score", "suggested_action", "reasoning", "model_label", "model_id",
               ... + 5 metadata fields}
 
@@ -1316,8 +1322,15 @@ def _call_llm_sync(news_content: str, model_cfg: Dict[str, str],
         else:
             prompt = _SYSTEM_PROMPT if use_json else _JSON_PROMPT_FORCE
 
-        # 组装 user content: [市场快照] + [历史绩效] + [新闻正文]
+        # 组装 user content: [新闻时间] + [市场快照] + [历史绩效] + [新闻正文]
         user_text = news_content[:2000]
+        if news_timestamp:
+            try:
+                ts_dt = datetime.fromisoformat(news_timestamp.replace("Z", "+00:00"))
+                ts_str = ts_dt.strftime("%Y-%m-%d %H:%M UTC")
+            except (ValueError, TypeError):
+                ts_str = news_timestamp[:19]
+            user_text = f"[新闻时间] {ts_str}\n\n{user_text}"
         if market_context:
             user_text = market_context + "\n\n" + user_text
         if performance_context:
@@ -1644,7 +1657,7 @@ async def _process_single(
         async with _LLM_SEMAPHORE:
             llm_result = await loop.run_in_executor(
                 None, _call_llm_sync, content, model_cfg, market_context,
-                performance_context,
+                performance_context, pre_ts,
             )
         return {
             "news_id": news_id,

@@ -1109,6 +1109,29 @@ _SYSTEM_PROMPT = """
   * 市场快照价格与你的方向判断矛盾时 → confidence 降级，market_confirmation 设 negative
   * 缺少市场数据时 market_confirmation 必须为 "unknown"
 
+═══ Score 锚定框架 ═══
+
+sentiment_score 反映的是「2 小时窗口内该事件推动价格方向的置信度与幅度预期」。
+按以下 5 级锚定，严禁拍脑袋给分：
+
+  ±0.05 ~ ±0.15  弱信号 — 情绪面扰动，无实质性资金流变化。例：官员口头表态但无政策落地、第三方评论。
+  ±0.15 ~ ±0.35  轻度信号 — 有资金面含义但影响间接。例：二级经济数据超预期、关联市场异动、监管传闻。
+  ±0.35 ~ ±0.55  中度信号 — 直接推动资产供需或风险偏好。例：CPI/NFP 大幅偏离预期、美元指数剧烈波动、
+                         交易所黑客/挤兑事件、主要机构增持/减持。
+  ±0.55 ~ ±0.75  强信号 — 直接催化 + 趋势共振，大概率引发波段行情。例：FOMC 意外转向、ETF 获批/拒绝、
+                        OPEC 减产决议、大国制裁升级。
+  ±0.75 ~ ±0.95  极端信号 — 结构性突变 / 黑天鹅。例：BTC ETF 历史性获批、战争爆发、主权违约、
+                          央行无限 QE、交易所破产。
+  ±1.00          绝对确信 — 几乎不使用。仅在「事后看不可能错」的极端事件中使用。
+
+锚定叠加规则：
+  * direct_catalyst=true → 对应档位上浮一档（如中度 0.45 → 强信号 0.65）
+  * event_strength=low → 上限 ±0.35；medium → 上限 ±0.70；high → 无上限
+  * market_confirmation=negative → 对应档位下调一档（市场在反向走，置信度必须降低）
+  * 历史绩效样本≥10 且胜率<30% → 下调一档；胜率>70% → 可上浮一档
+  * 多个事件因子叠加（如 CPI+FOMC+地缘同时发酵）→ 取最强因子上浮半档
+  * 方向与 1H 趋势同向 → +0.05~0.10；反向 → −0.05~0.10
+
 ═══ 历史绩效参考 ═══
 
 每条新闻的 user prompt 会附带 [Historical Performance] 区块，列出历史上类似信号的
@@ -1148,6 +1171,11 @@ _JSON_PROMPT_FORCE = """
 BTC 定性：纯风险资产，战争中 SELL，宽松中 BUY。
 不确定方向时 HOLD。score 严禁 0.0。
 市场快照价格与方向矛盾 → confidence 降级，market_confirmation=negative。
+
+Score 锚定（2h 窗口内价格推动置信度）：
+  ±0.05~0.15 弱信号 | ±0.15~0.35 轻度 | ±0.35~0.55 中度 | ±0.55~0.75 强信号 | ±0.75~0.95 极端
+  direct_catalyst=true → +1档 | event_strength=low → 上限±0.35 | market_confirmation=negative → -1档
+  趋势同向 +0.05~0.10 | 趋势反向 −0.05~0.10
 
 user prompt 中的 [Historical Performance] 是历史信号2h结算数据，作为研究参考。Insufficient sample 时忽略。
 

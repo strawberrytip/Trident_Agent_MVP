@@ -1695,13 +1695,15 @@ async def _process_single(
         }
 
 
-async def send_feishu_alert(news_text: str, action: str, score: float, reason: str) -> None:
+async def send_feishu_alert(news_text: str, action: str, score: float, reason: str,
+                           news_time: str = "") -> None:
     """
     Push a trading signal card to Feishu bot.
 
     Color logic: BUY/LONG → green, SELL/SHORT → red, else grey.
     Uses stdlib urllib in an executor thread — no aiohttp needed.
     Failures are silently swallowed (fire-and-forget).
+    news_time: ISO timestamp of the news event, displayed prominently on the card.
     """
     FEISHU_WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/473eaf03-e315-4ec6-9df0-e782629f0289"
 
@@ -1713,6 +1715,17 @@ async def send_feishu_alert(news_text: str, action: str, score: float, reason: s
     else:
         color = "grey"
 
+    # ── 格式化新闻时间戳 ──
+    ts_display = ""
+    if news_time:
+        try:
+            ts_dt = datetime.fromisoformat(news_time.replace("Z", "+00:00"))
+            ts_display = ts_dt.strftime("%Y-%m-%d %H:%M UTC")
+        except (ValueError, TypeError):
+            ts_display = news_time[:19]
+
+    time_line = f"\n🕐 **新闻时间**: {ts_display}" if ts_display else ""
+
     payload = {
         "msg_type": "interactive",
         "card": {
@@ -1723,7 +1736,7 @@ async def send_feishu_alert(news_text: str, action: str, score: float, reason: s
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": f"**新闻原文**: {news_text}\n\n**方向**: {action} | **得分**: {score}\n\n**AI 逻辑**: {reason}",
+                    "content": f"**新闻原文**: {news_text}{time_line}\n\n**方向**: {action} | **得分**: {score}\n\n**AI 逻辑**: {reason}",
                 }
             ],
         },
@@ -1930,11 +1943,13 @@ async def ai_worker(loop: asyncio.AbstractEventLoop) -> None:
         batch_ids = [r["id"] for r in batch]
         # Map news_id → content for downstream use (Feishu alerts etc.)
         content_map: Dict[int, str] = {}
+        timestamp_map: Dict[int, str] = {}
         for row in batch:
             c = row["content"]
             # Strip [hash:xxx] prefix for cleaner display
             c = re.sub(r'\[hash:[a-zA-Z0-9]+\]\s*', '', c)
             content_map[row["id"]] = c
+            timestamp_map[row["id"]] = row["timestamp"] or ""
         print(
             f"\n[{_now()}] [AI] Claimed {len(batch)} items: {batch_ids}"
         )
@@ -2260,12 +2275,14 @@ async def ai_worker(loop: asyncio.AbstractEventLoop) -> None:
             print(f"  └─ Consensus: {consensus_str}")
             # Fire-and-forget Feishu comparison card (Chinese title)
             feishu_body = "\n\n".join(feishu_lines)
+            news_ts = timestamp_map.get(nid, "")
             asyncio.create_task(
                 send_feishu_alert(
                     f"{display_title}\n\n**Consensus**: {consensus_str}",
                     consensus_str,
                     0.0,
                     feishu_body,
+                    news_ts,
                 )
             )
 

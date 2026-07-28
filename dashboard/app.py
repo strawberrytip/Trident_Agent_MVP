@@ -380,16 +380,15 @@ def load_signal_data(uploaded_file) -> pd.DataFrame:
     df["方向"] = df["方向"].str.upper().str.strip()
     df = df[df["方向"].isin(["BUY", "SELL", "多", "空", "LONG", "SHORT"])]
 
-    # 提取时间部分（假设格式为 HH:MM:SS 或 ISO timestamp）
+    # 提取时间部分（支持 "HH:MM:SS" 或 "YYYY-MM-DD HH:MM:SS"）
     def extract_time(t):
         if pd.isna(t):
             return None
         if isinstance(t, str):
-            # 尝试解析各种时间格式
-            for fmt in ["%H:%M:%S", "%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"]:
+            for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%H:%M:%S", "%H:%M"]:
                 try:
-                    dt = datetime.strptime(t, fmt)
-                    return dt.time()
+                    dt = datetime.strptime(t.strip(), fmt)
+                    return dt  # 返回完整 datetime 而非仅 time
                 except ValueError:
                     continue
         return t
@@ -415,7 +414,9 @@ def create_signal_label(row: pd.Series) -> str:
     """创建信号标签，用于Selectbox显示。"""
     asset = row.get("品种", "UNKNOWN")
     direction = row.get("方向", "")
-    time_str = str(row.get("时间", ""))[:8]  # HH:MM:SS
+    time_val = str(row.get("时间", ""))
+    # 如果有完整日期就显示完整，否则只截 HH:MM:SS
+    time_str = time_val[:19] if len(time_val) >= 10 else time_val[:8]
     news = str(row.get("新闻内容", ""))[:40] + "..." if len(str(row.get("新闻内容", ""))) > 40 else str(row.get("新闻内容", ""))
 
     # 标准化方向显示
@@ -752,17 +753,20 @@ def render_sidebar(df: pd.DataFrame) -> Tuple[pd.Series, datetime]:
     # 找到选中的行
     selected_row = df[df["信号标签"] == selected_label].iloc[0]
 
-    # 组合完整的日期时间
+    # 从"时间_提取"获取完整 datetime（优先），否则用日期选择器组合
     time_obj = selected_row.get("时间_提取")
     if time_obj is None:
         st.sidebar.error(f"无法解析时间: {selected_row.get('时间')}")
         return None, None
-
-    event_datetime = datetime.combine(selected_date, time_obj)
+    if isinstance(time_obj, datetime):
+        event_datetime = time_obj
+    else:
+        event_datetime = datetime.combine(selected_date, time_obj)
 
     # 显示信号概要
     st.sidebar.markdown("---")
     st.sidebar.subheader("📋 信号概要")
+    st.sidebar.caption(f"🕐 {event_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
     st.sidebar.metric("品种", f"{selected_row['品种']} ({ASSET_NAMES.get(selected_row['品种'], selected_row['品种'])})")
     st.sidebar.metric("方向", "做多" if selected_row["方向"] in ["BUY", "多", "LONG"] else "做空")
     if pd.notna(selected_row.get("入场价")):
@@ -801,7 +805,9 @@ def render_signal_header(row: pd.Series):
         unsafe_allow_html=True,
     )
 
-    st.markdown(f"<div class='news-title'>📰 {news}</div>", unsafe_allow_html=True)
+    ts_str = row.get("时间", "")[:19]
+    ts_caption = f" 🕐 {ts_str}" if ts_str else ""
+    st.markdown(f"<div class='news-title'>📰 {news}{ts_caption}</div>", unsafe_allow_html=True)
 
 
 def render_metrics(row: pd.Series):

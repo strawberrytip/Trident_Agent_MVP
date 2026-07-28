@@ -1720,7 +1720,7 @@ async def send_feishu_alert(news_text: str, action: str, score: float, reason: s
     if news_time:
         try:
             ts_dt = datetime.fromisoformat(news_time.replace("Z", "+00:00"))
-            ts_display = ts_dt.strftime("%Y-%m-%d %H:%M UTC")
+            ts_display = ts_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
         except (ValueError, TypeError):
             ts_display = news_time[:19]
 

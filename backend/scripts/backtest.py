@@ -57,9 +57,9 @@ def _fmt_time(val: str | None) -> str:
         return "—"
     try:
         dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
-        return dt.astimezone(TZ_SHANGHAI).strftime("%H:%M:%S")
+        return dt.astimezone(TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
-        return str(val)[:16]
+        return str(val)[:19]
 
 
 def _pct_str(v: float | None) -> str:

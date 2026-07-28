@@ -47,9 +47,9 @@ def _format_time(iso_ts):
         return "——"
     try:
         dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
-        return dt.astimezone(TZ_SHANGHAI).strftime("%H:%M:%S")
+        return dt.astimezone(TZ_SHANGHAI).strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
-        return (iso_ts or "")[:8] or "——"
+        return (iso_ts or "")[:19] or "——"
 
 def _safe(row, key, default=None):
     """sqlite3.Row safe access — no .get() method."""

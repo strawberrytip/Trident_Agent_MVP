@@ -380,7 +380,8 @@ def load_signal_data(uploaded_file) -> pd.DataFrame:
     df["方向"] = df["方向"].str.upper().str.strip()
     df = df[df["方向"].isin(["BUY", "SELL", "多", "空", "LONG", "SHORT"])]
 
-    # 提取时间部分（支持 "HH:MM:SS" 或 "YYYY-MM-DD HH:MM:SS"）
+    # 提取时间用于显示和K线查询
+    df["时间_原始"] = df["时间"].astype(str)  # 保留原始字符串用于显示
     def extract_time(t):
         if pd.isna(t):
             return None
@@ -388,7 +389,7 @@ def load_signal_data(uploaded_file) -> pd.DataFrame:
             for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%H:%M:%S", "%H:%M"]:
                 try:
                     dt = datetime.strptime(t.strip(), fmt)
-                    return dt  # 返回完整 datetime 而非仅 time
+                    return dt.time()  # 只返回时间部分，日期由用户选择器决定
                 except ValueError:
                     continue
         return t
@@ -753,20 +754,20 @@ def render_sidebar(df: pd.DataFrame) -> Tuple[pd.Series, datetime]:
     # 找到选中的行
     selected_row = df[df["信号标签"] == selected_label].iloc[0]
 
-    # 从"时间_提取"获取完整 datetime（优先），否则用日期选择器组合
+    # K线查询用用户选的日期 + Excel里的时分秒
     time_obj = selected_row.get("时间_提取")
     if time_obj is None:
         st.sidebar.error(f"无法解析时间: {selected_row.get('时间')}")
         return None, None
-    if isinstance(time_obj, datetime):
-        event_datetime = time_obj
-    else:
-        event_datetime = datetime.combine(selected_date, time_obj)
+
+    event_datetime = datetime.combine(selected_date, time_obj)
+    # 显示用的完整原始时间戳
+    display_ts = str(selected_row.get("时间_原始", selected_row.get("时间", "")))[:19]
 
     # 显示信号概要
     st.sidebar.markdown("---")
     st.sidebar.subheader("📋 信号概要")
-    st.sidebar.caption(f"🕐 {event_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+    st.sidebar.caption(f"🕐 {display_ts}")
     st.sidebar.metric("品种", f"{selected_row['品种']} ({ASSET_NAMES.get(selected_row['品种'], selected_row['品种'])})")
     st.sidebar.metric("方向", "做多" if selected_row["方向"] in ["BUY", "多", "LONG"] else "做空")
     if pd.notna(selected_row.get("入场价")):

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight, Download, Radio, Wifi, WifiOff } from 'lucide-react'
 import type { ApiEvent } from '@/lib/quant-data'
+import { computeMFE, computeMAE, computeMFETime, computeMAETime, getImpactThreshold, calculateHeatScore } from '@/lib/signal-utils'
 import { SignalBadge } from './signal-badge'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || ''
@@ -36,55 +37,6 @@ function VerdictBadge({ verdict }: { verdict: string }) {
       {verdict === 'WIN' ? 'CORRECT' : verdict === 'LOSS' ? 'WRONG' : verdict}
     </span>
   )
-}
-
-function computeMFE(action: string, entry: number, max: number, min: number): number | null {
-  if (!entry || entry <= 0) return null
-  if (action === 'BUY' && max && max > 0) return ((max - entry) / entry) * 100
-  if (action === 'SELL' && min && min > 0) return ((entry - min) / entry) * 100
-  return null
-}
-
-function computeMAE(action: string, entry: number, max: number, min: number): number | null {
-  if (!entry || entry <= 0) return null
-  if (action === 'BUY' && min && min > 0) return ((min - entry) / entry) * 100
-  if (action === 'SELL' && max && max > 0) return ((entry - max) / entry) * 100
-  return null
-}
-
-function getImpactThreshold(asset: string): number {
-  const a = asset?.toUpperCase() || ''
-  if (a === 'BTC') return 2.0
-  if (a === 'XAU' || a === 'GOLD') return 1.0
-  if (a === 'WTI') return 1.5
-  return 2.0 // default
-}
-
-function _formatTimeDelta(entryTime: string, targetUnix: number): string | null {
-  if (!targetUnix || targetUnix <= 0 || !entryTime) return null
-  try {
-    const etMs = Date.parse(entryTime)
-    if (isNaN(etMs)) return null
-    const etUnix = Math.floor(etMs / 1000)
-    const minutes = Math.round(((targetUnix - etUnix) / 60) * 10) / 10
-    if (minutes < 0) return null
-    return `${minutes}`
-  } catch {
-    return null
-  }
-}
-
-function computeMFETime(action: string, entryTime: string, maxPtime: number, minPtime: number): string | null {
-  return _formatTimeDelta(entryTime, action === 'BUY' ? maxPtime : minPtime)
-}
-
-function computeMAETime(action: string, entryTime: string, maxPtime: number, minPtime: number): string | null {
-  return _formatTimeDelta(entryTime, action === 'BUY' ? minPtime : maxPtime)
-}
-
-function calculateHeatScore(clusterSize: number): number {
-  if (clusterSize <= 1) return 0
-  return Math.min(99, Math.floor(100 * (1 - Math.exp(-0.4 * (clusterSize - 1)))))
 }
 
 function HeatBadge({ size }: { size: number }) {

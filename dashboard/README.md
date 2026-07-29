@@ -54,21 +54,22 @@ streamlit run app.py --server.port 8501 --server.address 127.0.0.1
 
 ## 品种映射
 
-系统自动将以下品种映射到 yfinance：
+系统自动将品种映射到币安 U 本位永续合约（`fapi.binance.com/fapi/v1/klines`）：
 
-| Trident代码 | yfinance代码 | 中文名称 |
+| Trident代码 | 币安合约代码 | 中文名称 |
 |------------|-------------|---------|
-| XAU/GOLD   | GC=F        | 黄金    |
-| BTC        | BTC-USD     | 比特币  |
-| WTI/OIL    | CL=F        | 原油    |
-| ETH        | ETH-USD     | 以太坊  |
-| SOL        | SOL-USD     | Solana  |
+| XAU/GOLD   | XAUUSDT     | 黄金    |
+| BTC        | BTCUSDT     | 比特币  |
+| ETH        | ETHUSDT     | 以太坊  |
+| SOL        | SOLUSDT     | Solana  |
+| WTI/OIL    | XAUUSDT     | 原油（币安无原油合约，回退黄金） |
+| 其他       | `{代码}USDT` | 自动拼接 |
 
 ## 注意事项
 
-⚠️ **yfinance 1分钟数据限制**：
-- 1分钟级K线数据通常只保留最近30-60天
-- 如需分析更早的交易，可能需要其他数据源
+⚠️ **币安 K 线数据限制**：
+- 1分钟级K线单次最多返回1000根，代码已循环拉取
+- 仅能查询该合约在币安上市后的历史数据
 
 💡 **图表交互**：
 - 鼠标悬停查看详细价格
@@ -79,5 +80,5 @@ streamlit run app.py --server.port 8501 --server.address 127.0.0.1
 
 - **前端框架**: Streamlit
 - **图表库**: Plotly Graph Objects
-- **数据源**: yfinance (Yahoo Finance API)
+- **数据源**: 币安合约公开 API (fapi.binance.com)
 - **数据处理**: pandas

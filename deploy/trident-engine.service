@@ -1,0 +1,18 @@
+# Trident 新闻引擎（WebSocket 采集 + AI worker + 前向验证）
+# 部署路径假设为 /opt/trident，venv 在 /opt/trident/venv — 按需修改
+[Unit]
+Description=Trident Agent - News Engine (WS ingest + AI worker)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trident
+WorkingDirectory=/opt/trident/backend/src_python
+EnvironmentFile=/opt/trident/backend/.env
+ExecStart=/opt/trident/venv/bin/python engine.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

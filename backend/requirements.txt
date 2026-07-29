@@ -24,5 +24,8 @@ python-dotenv>=1.0.0
 # ── Crypto Exchange (Binance) ──────────────────────────────
 ccxt>=4.3.0
 
+# ── TreeNews Bridge (treenews_bridge.py) ───────────────────
+websocket-client>=1.7.0
+
 # ⚠️ MetaTrader5 仅支持 Windows，Ubuntu 跳过
 # MetaTrader5>=5.0

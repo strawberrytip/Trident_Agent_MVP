@@ -29,13 +29,14 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(BASE_DIR, "trident_event_bus.db")
-from dotenv import load_dotenv
-# .env 在项目根目录（backend/ 的上一层）
-load_dotenv(os.path.join(os.path.dirname(BASE_DIR), ".env"))
+import config
+import db
+from engine.prices import _fetch_eastmoney_xau, _fetch_sina_xau
 
-TZ_SHANGHAI = timezone(timedelta(hours=8))
+BASE_DIR = config.BASE_DIR
+DB_PATH = config.DB_PATH
+
+TZ_SHANGHAI = config.TZ_SHANGHAI
 
 _SSE_QUEUES: List[asyncio.Queue] = []
 
@@ -250,26 +251,9 @@ def _mt5_recheck() -> None:
     except Exception:
         pass
 
-def _fetch_sina_xau() -> float | None:
-    req = urllib.request.Request(
-        "https://hq.sinajs.cn/list=hf_XAU",
-        headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"},
-    )
-    resp = urllib.request.urlopen(req, timeout=8)
-    text = resp.read().decode("gbk", errors="replace")
-    if '="' in text:
-        return float(text.split('="')[1].split(",")[0])
-    return None
-
-def _fetch_eastmoney_xau() -> float | None:
-    req = urllib.request.Request(
-        "https://push2.eastmoney.com/api/qt/stock/get?secid=113.USDXAU&fields=f43",
-        headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"},
-    )
-    resp = urllib.request.urlopen(req, timeout=8)
-    body = json.loads(resp.read().decode("utf-8"))
-    return float(body["data"]["f43"]) / 100.0
-
+# _fetch_sina_xau / _fetch_eastmoney_xau 统一由 engine.prices 提供（见文件头 import）。
+# 注意：engine.prices 版本超时 5s 且内部吞异常返回 None，与本模块 _http_fetch_gold 的
+# try/except + 500<p<10000 过滤组合后行为等价。
 def _http_fetch_gold() -> tuple[float | None, str]:
     for name, fn in [("Sina", _fetch_sina_xau), ("EastMoney", _fetch_eastmoney_xau)]:
         try:
@@ -342,6 +326,9 @@ def _mt5_read_wti_tick() -> float | None:
     except Exception:
         return None
 
+# 注意：WTI 抓取与 engine.prices._fetch_wti_price 不同源（EastMoney secid=113.USDWTI、
+# 有效区间 30–200、超时 8s、异常向上抛由 _http_fetch_wti 捕获）——为保持行为不变，
+# 这两个函数保留在本模块，不做去重。
 def _fetch_sina_wti() -> float | None:
     req = urllib.request.Request(
         "https://hq.sinajs.cn/list=hf_CL",
@@ -458,34 +445,9 @@ def _mock_klines(limit: int, *, base: float, seed: int):
 
 def _migrate_schema() -> None:
     """Add any missing columns to ai_decisions. Safe to call repeatedly."""
-    import sqlite3 as _sqlite3
-    conn = _sqlite3.connect(DB_PATH)
+    conn = db.get_connection()
     try:
-        for col, col_def in [
-            ("parent_id",        "INTEGER DEFAULT NULL"),
-            ("child_count",      "INTEGER DEFAULT 0"),
-            ("aggregation_key",  "TEXT DEFAULT ''"),
-            ("reasoning_path",   "TEXT DEFAULT ''"),
-            ("vip_tag",          "TEXT DEFAULT ''"),
-            ("doubao_action",       "TEXT DEFAULT 'HOLD'"),
-            ("doubao_reasoning",    "TEXT DEFAULT ''"),
-            ("extra_models_consensus", "TEXT DEFAULT ''"),
-            ("entry_price",      "REAL DEFAULT NULL"),
-            ("exit_price",       "REAL DEFAULT NULL"),
-            ("max_price",        "REAL DEFAULT NULL"),
-            ("min_price",        "REAL DEFAULT NULL"),
-            ("is_correct",       "TEXT DEFAULT ''"),
-            ("settled",          "INTEGER DEFAULT 0"),
-            ("entry_time",       "TEXT DEFAULT ''"),
-            ("max_price_time",   "INTEGER DEFAULT 0"),
-            ("min_price_time",   "INTEGER DEFAULT 0"),
-            ("cluster_size",     "INTEGER DEFAULT 1"),
-        ]:
-            try:
-                conn.execute(f"ALTER TABLE ai_decisions ADD COLUMN {col} {col_def};")
-            except _sqlite3.OperationalError:
-                pass
-        conn.commit()
+        db.migrate(conn)
     finally:
         conn.close()
 
@@ -514,7 +476,7 @@ app = FastAPI(title="Trident Agent API", version="4.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=config.CORS_ALLOW_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

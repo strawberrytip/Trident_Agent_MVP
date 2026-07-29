@@ -1,0 +1,18 @@
+# Trident API 服务（FastAPI + SSE，127.0.0.1:8000）
+# 部署路径假设为 /opt/trident，venv 在 /opt/trident/venv — 按需修改
+[Unit]
+Description=Trident Agent - API Server (FastAPI + SSE)
+After=network-online.target trident-engine.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trident
+WorkingDirectory=/opt/trident/backend/src_python
+EnvironmentFile=/opt/trident/backend/.env
+ExecStart=/opt/trident/venv/bin/uvicorn api_server:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

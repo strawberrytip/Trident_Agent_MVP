@@ -1,0 +1,38 @@
+# Trident Agent MVP — Nginx 反向代理示例
+# 把 server_name 改成你的域名； HTTPS 证书建议用 certbot 另行配置。
+#
+# 拓扑：
+#   /api/*  → FastAPI (127.0.0.1:8000)，含 SSE 长连接 /api/events/stream
+#   /*      → Next.js 前端 (127.0.0.1:3000)
+
+server {
+    listen 80;
+    server_name example.com;  # 改成你的域名或服务器 IP
+
+    # ── FastAPI 后端（REST + SSE） ──
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;   # 不带尾斜杠，保留 /api/ 前缀
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";     # SSE 必需：去掉逐跳 Connection 头
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # SSE 长连接必需：禁用缓冲与缓存，放宽读超时
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+    }
+
+    # ── Next.js 前端 ──
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        # Next.js HMR / WebSocket upgrade
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}

@@ -5,6 +5,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import { SignalBadge } from './signal-badge'
 import { formatPrice } from './price-ticker'
 import type { ApiEvent, MarketCategory } from '@/lib/quant-data'
+import { computeMFE, computePnL } from '@/lib/signal-utils'
 import type { PriceMap } from '@/hooks/use-binance-prices'
 
 type Props = {
@@ -23,30 +24,6 @@ const CATEGORY_LABEL: Record<string, string> = {
 }
 
 const TRACKED_ASSETS = new Set(['BTC', 'ETH', 'SOL', 'XAU', 'GOLD', 'WTI'])
-
-function computeMFEForLedger(
-  action: string,
-  entry: number | null,
-  max: number | null,
-  min: number | null,
-): number | null {
-  if (!entry || entry <= 0) return null
-  if (action === 'BUY' && max && max > 0) return ((max - entry) / entry) * 100
-  if (action === 'SELL' && min && min > 0) return ((entry - min) / entry) * 100
-  return null
-}
-
-function computePnL(
-  action: string,
-  entry: number,
-  current: number,
-): { pct: number; positive: boolean } {
-  if (!entry || entry === 0) return { pct: 0, positive: false }
-  const raw = action === 'SELL'
-    ? ((entry - current) / entry) * 100
-    : ((current - entry) / entry) * 100
-  return { pct: Math.round(raw * 100) / 100, positive: raw >= 0 }
-}
 
 function VerdictLabel({ verdict }: { verdict: string }) {
   const v = verdict?.toUpperCase()
@@ -196,7 +173,7 @@ export function SignalLedger({ events, activeMarket, livePrices, entryPrices }: 
                       </td>
                       <td className="px-4 py-2.5 text-right font-mono tabular-nums text-emerald-500/80">
                         {(() => {
-                          const mfeVal = computeMFEForLedger(ev.action, entry ?? null, ev.max_price, ev.min_price)
+                          const mfeVal = computeMFE(ev.action, entry ?? null, ev.max_price, ev.min_price)
                           return mfeVal !== null ? `${mfeVal >= 0 ? '+' : ''}${Math.round(mfeVal * 100) / 100}%` : '—'
                         })()}
                       </td>
@@ -250,7 +227,7 @@ export function SignalLedger({ events, activeMarket, livePrices, entryPrices }: 
                           </td>
                           <td className="px-4 py-2 text-right font-mono text-xs tabular-nums text-emerald-500/80">
                             {(() => {
-                              const childMfe = computeMFEForLedger(child.action, childEntry ?? null, child.max_price, child.min_price)
+                              const childMfe = computeMFE(child.action, childEntry ?? null, child.max_price, child.min_price)
                               return childMfe !== null ? `${childMfe >= 0 ? '+' : ''}${Math.round(childMfe * 100) / 100}%` : '—'
                             })()}
                           </td>

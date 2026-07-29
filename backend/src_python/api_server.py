@@ -1059,8 +1059,132 @@ async def health_check():
     }
 
 
+# ---------------------------------------------------------------------------
+# Trading System API — 精简接口供外部交易系统对接
+# ---------------------------------------------------------------------------
+
+@app.get("/api/trading/signals")
+async def get_trading_signals(
+    asset: str = "",
+    action: str = "",
+    limit: int = 20,
+    settled: int = -1,  # -1=全部, 0=未结算, 1=已结算
+):
+    """
+    交易系统对接接口 — 返回精简版信号数据。
+
+    Query params:
+      asset   — 品种过滤，如 BTC / XAU / WTI / ETH（留空=全部）
+      action  — 方向过滤，BUY / SELL / HOLD（留空=全部）
+      limit   — 返回条数，默认 20，最大 200
+      settled — 结算状态，0=未结算 / 1=已结算 / -1=全部（默认）
+
+    返回字段:
+      signal_id, news_time, asset, action, score, reasoning, reasoning_path,
+      market_category, event_strength, direct_catalyst, prediction_type,
+      market_confirmation, entry_price, exit_price, is_correct, settled, created_at
+    """
+    limit = min(max(limit, 1), 200)
+
+    where_clauses = []
+    params: List[Any] = []
+
+    if asset:
+        where_clauses.append("UPPER(ad.target_asset) = ?")
+        params.append(asset.upper())
+    if action:
+        where_clauses.append("UPPER(ad.suggested_action) = ?")
+        params.append(action.upper())
+    if settled >= 0:
+        where_clauses.append("ad.settled = ?")
+        params.append(settled)
+
+    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            f"""
+            SELECT
+                ad.id,
+                rn.timestamp AS news_time,
+                UPPER(ad.target_asset) AS asset,
+                UPPER(ad.suggested_action) AS action,
+                ad.sentiment_score AS score,
+                ad.reasoning,
+                ad.reasoning_path,
+                ad.market_category,
+                ad.event_strength,
+                ad.direct_catalyst,
+                ad.prediction_type,
+                ad.market_confirmation,
+                ad.entry_price,
+                ad.exit_price,
+                ad.is_correct,
+                ad.settled,
+                ad.created_at
+            FROM ai_decisions ad
+            INNER JOIN raw_news rn ON rn.id = ad.news_id
+            WHERE {where_sql}
+            ORDER BY ad.id DESC
+            LIMIT ?
+            """,
+            params + [limit],
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/trading/latest")
+async def get_latest_signals():
+    """
+    交易系统对接接口 — 每个品种的最新一条信号。
+
+    返回: 按品种分组的最近信号，含 score/action/reasoning。
+    覆盖品种: BTC, ETH, XAU, WTI, SOL
+    """
+    assets = ("BTC", "ETH", "XAU", "WTI", "SOL")
+    result: Dict[str, Any] = {}
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        for a in assets:
+            cursor = await db.execute(
+                """
+                SELECT
+                    ad.id,
+                    rn.timestamp AS news_time,
+                    UPPER(ad.target_asset) AS asset,
+                    UPPER(ad.suggested_action) AS action,
+                    ad.sentiment_score AS score,
+                    ad.reasoning,
+                    ad.reasoning_path,
+                    ad.market_category,
+                    ad.event_strength,
+                    ad.direct_catalyst,
+                    ad.prediction_type,
+                    ad.market_confirmation,
+                    ad.entry_price,
+                    ad.created_at
+                FROM ai_decisions ad
+                INNER JOIN raw_news rn ON rn.id = ad.news_id
+                WHERE UPPER(ad.target_asset) = ?
+                ORDER BY ad.id DESC
+                LIMIT 1
+                """,
+                (a,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            result[a] = dict(row) if row else None
+    return result
+
+
 # -- Entry point -----------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False, log_level="info")
+    _host = os.getenv("API_HOST", "0.0.0.0")
+    _port = int(os.getenv("API_PORT", "8000"))
+    uvicorn.run(app, host=_host, port=_port, reload=False, log_level="info")
